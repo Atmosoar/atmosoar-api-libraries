@@ -23,3 +23,7 @@ vendor/
 # Environment files
 .env
 .env.local
+
+# Vulnerability scan artifacts (produced by CI scripts, not committed)
+osv.txt
+vuln_summary.env

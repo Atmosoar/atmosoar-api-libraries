@@ -1,0 +1,62 @@
+name: Go
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  schedule:
+    - cron: "00 02 * * *"   # nightly at 02:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'  # skip on cron
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build Go packages
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Install scanner tools
+        run: bash .github/workflows/scripts/install_scanner_tools.sh
+
+      - name: Print coverage summary
+        run: bash .github/workflows/scripts/print_coverage.sh
+
+
+  cq:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install scanner tools
+        run: bash .github/workflows/scripts/install_scanner_tools.sh
+
+      # --- Dependency vulnerability checks ---
+
+      - name: Vulnerability scans
+        run: bash .github/workflows/scripts/run_vuln_scans.sh
+
+      - name: Enforce vulnerability policy
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: bash .github/workflows/scripts/enforce_policy.sh
