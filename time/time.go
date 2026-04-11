@@ -1,0 +1,376 @@
+// Package time provides parsers and expansion helpers for time query
+// parameters used by Atmosoar services (single timestamp, range with
+// resolution, list, and named time shortcuts).
+//
+// NOTE: This package is named "time" which shadows the standard library
+// package of the same name. Consumers that also need stdlib time should
+// alias this import, e.g.:
+//
+//	import (
+//	    "time"
+//	    atmotime "atmosoar.io/atmosoar-api-libraries/time"
+//	)
+//
+// Inside this package itself, the stdlib "time" is imported normally and
+// referenced as `time.Time` without conflict — the package's own name is
+// not used to qualify identifiers from within the package.
+package time
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+// TimeRange represents different time parameter formats.
+// Name preserved from MMA-171's in-tree implementation so the cutover is a pure import swap.
+//
+//nolint:revive // parity: renaming would break the MMA-171 drop-in swap contract.
+type TimeRange struct {
+	Type    TimeRangeType `json:"type"`
+	Payload interface{}   `json:"payload"`
+}
+
+// TimeRangeType is a type to not use a raw string for readeablity.
+//
+//nolint:revive // parity: renaming would break the MMA-171 drop-in swap contract.
+type TimeRangeType string
+
+const (
+	// TimeTypeSingle used for single time points
+	TimeTypeSingle TimeRangeType = "single"
+	// TimeTypeRange used for a range of points using start, end and a resolution
+	TimeTypeRange TimeRangeType = "range"
+	// TimeTypeList used for a list of time points
+	TimeTypeList TimeRangeType = "list"
+)
+
+// SingleTime just the time
+type SingleTime struct {
+	Timestamp time.Time `json:"timestamp" validate:"required"`
+}
+
+// RangeTime holds end and start time and a resolution, one of the possible types of time input in the url query
+type RangeTime struct {
+	Start      time.Time `json:"start"      validate:"required"`
+	End        time.Time `json:"end"        validate:"required"`
+	Resolution int       `json:"resolution" validate:"required"` // in hours
+}
+
+// ListTime holds a list of times, one of the possible types of time input in the url query
+type ListTime struct {
+	Timestamps []time.Time `json:"timestamps" validate:"required"`
+}
+
+// TimeShortcutsMap holds the time shortcuts defined in the config.toml
+var TimeShortcutsMap = map[string]func() time.Time{}
+
+// TimeRangeShortcutsMap holds the range_offset time shortcuts defined in the config.toml
+var TimeRangeShortcutsMap = map[string]func() RangeTime{}
+
+// ParseTime takes in the raw time string from the querie and tries parsing it to one of the TimeRangeTypes.
+// 150: The input is lowercased before shortcut map lookups so that
+// e.g. "Now", "NOW", "now" and "3Day", "3DAY", "3day" all resolve identically.
+func ParseTime(timeStr string) (*TimeRange, error) {
+	// 150: Lowercase for case-insensitive shortcut matching.
+	timeLower := strings.ToLower(timeStr)
+
+	// Check range shortcuts (e.g. 3day, 7day, 10day) before delimiter-based parsing
+	if fn, exists := TimeRangeShortcutsMap[timeLower]; exists {
+		rt := fn()
+		return &TimeRange{
+			Type:    TimeTypeRange,
+			Payload: rt,
+		}, nil
+	}
+
+	// Try parsing as time list (pipe separated)
+	if strings.Contains(timeStr, "|") {
+		return parseTimeList(timeStr)
+	}
+
+	// Try parsing as time range (start/end)
+	if strings.Contains(timeStr, ",") {
+		return parseTimeRange(timeStr)
+	}
+
+	// Try parsing as single timestamp
+	return parseSingleTime(timeStr)
+}
+
+func parseSingleTime(timeStr string) (*TimeRange, error) {
+	t, err := time.Parse(time.RFC3339, timeStr)
+	if err == nil {
+		return &TimeRange{
+			Type:    TimeTypeSingle,
+			Payload: SingleTime{Timestamp: t},
+		}, nil
+	}
+
+	t, err = parseTimeShortcut(timeStr)
+	if err == nil {
+		return &TimeRange{
+			Type:    TimeTypeSingle,
+			Payload: SingleTime{Timestamp: t},
+		}, nil
+	}
+	return nil, fmt.Errorf("invalid time format, expected RFC3339")
+}
+
+func parseTimeRange(rangeStr string) (*TimeRange, error) {
+	parts := strings.Split(rangeStr, ",")
+	if len(parts) != 2 && len(parts) != 3 {
+		return nil, fmt.Errorf("invalid time range format")
+	}
+
+	start, err := time.Parse(time.RFC3339, parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse %s to RFC3339 time", parts[0])
+	}
+
+	end, err := time.Parse(time.RFC3339, parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse %s to RFC3339 time", parts[1])
+	}
+
+	// If no resolution is provided, return as a simple range
+	if len(parts) < 3 {
+		return &TimeRange{
+			Type: TimeTypeRange,
+			Payload: RangeTime{
+				Start:      start,
+				End:        end,
+				Resolution: 0,
+			},
+		}, nil
+	}
+
+	resolution, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("resolution %s has to be an integer", parts[2])
+	}
+
+	if resolution <= 0 {
+		return nil, fmt.Errorf("resolution must be a positive integer")
+	}
+
+	// Calculate the time points based on resolution
+	duration := end.Sub(start)
+	if duration <= 0 {
+		return nil, fmt.Errorf("end time must be after start time")
+	}
+
+	step := duration / time.Duration(resolution)
+	var timestamps []time.Time
+
+	current := start
+	for i := 0; i <= resolution; i++ {
+		timestamps = append(timestamps, current)
+		current = current.Add(step)
+
+		// Ensure we don't go beyond the end time due to rounding errors
+		if current.After(end) {
+			current = end
+		}
+	}
+
+	return &TimeRange{
+		Type: TimeTypeList,
+		Payload: ListTime{
+			Timestamps: timestamps,
+		},
+	}, nil
+}
+
+func parseTimeList(listStr string) (*TimeRange, error) {
+	timeStrs := strings.Split(listStr, "|")
+	var times []time.Time
+
+	for _, ts := range timeStrs {
+		t, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			return nil, err
+		}
+		times = append(times, t)
+	}
+
+	return &TimeRange{
+		Type:    TimeTypeList,
+		Payload: ListTime{Timestamps: times},
+	}, nil
+}
+
+// parseTimeShortcut returns the appropriate time for a given shortcut.
+// 150: Lowercases the shortcut before lookup for case-insensitive matching.
+func parseTimeShortcut(shortcut string) (time.Time, error) {
+	if fn, exists := TimeShortcutsMap[strings.ToLower(shortcut)]; exists {
+		return fn(), nil
+	}
+	return time.Time{}, fmt.Errorf("input does not map to valid shortcut")
+}
+
+// ExpandTimes resolves a TimeRange into a flat slice of time.Time values.
+func ExpandTimes(tr TimeRange) []time.Time {
+	switch tr.Type {
+	case TimeTypeSingle:
+		if v, ok := tr.Payload.(SingleTime); ok {
+			return []time.Time{v.Timestamp}
+		}
+		if v, ok := tr.Payload.(*SingleTime); ok && v != nil {
+			return []time.Time{v.Timestamp}
+		}
+
+	case TimeTypeList:
+		if v, ok := tr.Payload.(ListTime); ok {
+			return v.Timestamps
+		}
+		if v, ok := tr.Payload.(*ListTime); ok && v != nil {
+			return v.Timestamps
+		}
+
+	case TimeTypeRange:
+		// Support both: (1) raw RangeTime payload, (2) already-expanded ListTime payload.
+		if v, ok := tr.Payload.(ListTime); ok {
+			// If parse layer already expanded the range → just return the list
+			return v.Timestamps
+		}
+		if v, ok := tr.Payload.(*ListTime); ok && v != nil {
+			return v.Timestamps
+		}
+
+		var rt *RangeTime
+		if v, ok := tr.Payload.(RangeTime); ok {
+			rt = &v
+		} else if v, ok := tr.Payload.(*RangeTime); ok && v != nil {
+			rt = v
+		}
+		if rt != nil {
+			start, end, res := rt.Start, rt.End, rt.Resolution
+			if !end.After(start) {
+				// Non-positive span → return start only
+				return []time.Time{start}
+			}
+			// If res is the number of segments, we return res+1 points (inclusive).
+			if res <= 0 {
+				return []time.Time{start, end}
+			}
+			step := end.Sub(start) / time.Duration(res)
+			out := make([]time.Time, 0, res+1)
+			cur := start
+			for i := 0; i <= res; i++ {
+				if i == res {
+					out = append(out, end.UTC())
+				} else {
+					out = append(out, cur.UTC())
+					cur = cur.Add(step)
+				}
+			}
+			return out
+		}
+	}
+	return nil
+}
+
+// --- Shortcut builders (formerly middleware/config/shortcut_builder.go) ---
+
+// TimeShortcutRaw holds the raw data of one time shortcut.
+//
+//nolint:revive // parity: renaming would break the MMA-171 drop-in swap contract.
+type TimeShortcutRaw struct {
+	Type  string `mapstructure:"type"`            // "now" | "offset" | "fixed"
+	Hours *int   `mapstructure:"hours,omitempty"` // for offset
+	Value string `mapstructure:"value,omitempty"` // RFC3339 for fixed
+}
+
+// TimeShortcut holds the type of the time shortcut "now", "offset" in hours or "fixed"
+// based on this Hours and Value, with value being optional.
+//
+//nolint:revive // parity: renaming would break the MMA-171 drop-in swap contract.
+type TimeShortcut struct {
+	Type  string
+	Hours *int
+	Value string `mapstructure:"value,omitempty"`
+}
+
+// BuildTimeShortcuts creates the dynamic timeShortcutsMap directly from a map[string]TimeShortcut.
+func BuildTimeShortcuts(shortcuts map[string]TimeShortcut) map[string]func() time.Time {
+	m := make(map[string]func() time.Time, len(shortcuts))
+	for name, sc := range shortcuts {
+		// capture loop vars
+		nameLocal := name
+		scLocal := sc
+
+		m[nameLocal] = func() time.Time {
+			now := time.Now().UTC()
+			switch scLocal.Type {
+			case "now":
+				return FormatTimeDataToRFC3339(now)
+
+			case "offset":
+				if scLocal.Hours == nil {
+					// fallback if hours not provided
+					return FormatTimeDataToRFC3339(now)
+				}
+				base := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+				return FormatTimeDataToRFC3339(base.Add(time.Duration(*scLocal.Hours) * time.Hour))
+
+			case "fixed":
+				if t, err := time.Parse(time.RFC3339, scLocal.Value); err == nil {
+					return FormatTimeDataToRFC3339(t.UTC())
+				}
+				// invalid fallback
+				return FormatTimeDataToRFC3339(now)
+
+			default:
+				// unknown type -> fallback
+				return FormatTimeDataToRFC3339(now)
+			}
+		}
+	}
+	return m
+}
+
+// BuildRangeTimeShortcuts creates the dynamic timeRangeShortcutsMap from range_offset entries.
+// Each returned func computes: Start = UTC midnight of current day, End = Start + hours.
+// Entries with hours <= 0 are logged as warnings and skipped.
+func BuildRangeTimeShortcuts(shortcuts map[string]TimeShortcut, log *zap.SugaredLogger) map[string]func() RangeTime {
+	m := make(map[string]func() RangeTime)
+	for name, sc := range shortcuts {
+		if sc.Type != "range_offset" {
+			continue
+		}
+
+		if sc.Hours == nil || *sc.Hours <= 0 {
+			if log != nil {
+				log.Warnw("skipping range_offset shortcut with invalid hours",
+					"shortcut", name,
+					"hours", sc.Hours,
+				)
+			}
+			continue
+		}
+
+		hours := *sc.Hours
+		m[name] = func() RangeTime {
+			now := time.Now().UTC()
+			start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+			end := start.Add(time.Duration(hours) * time.Hour)
+			return RangeTime{
+				Start:      FormatTimeDataToRFC3339(start),
+				End:        FormatTimeDataToRFC3339(end),
+				Resolution: 0,
+			}
+		}
+	}
+	return m
+}
+
+// FormatTimeDataToRFC3339 does as the name says
+func FormatTimeDataToRFC3339(t time.Time) time.Time {
+	formattedTime := t.Format(time.RFC3339)
+	parsed, _ := time.Parse(time.RFC3339, formattedTime)
+	return parsed
+}

@@ -1,0 +1,86 @@
+version: '2'
+
+issues:
+  max-same-issues: 50
+
+formatters:
+  enable:
+    - goimports
+    - golines
+    - gofmt
+  settings:
+    goimports:
+      local-prefixes:
+        - atmosoar.io/atmosoar-api-libraries
+    golines:
+      max-len: 120
+
+linters:
+  enable:
+    # Essential reliability linters
+    - bodyclose
+    - errcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - govet
+    - noctx
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+
+    # Code quality
+    - asasalint
+    - bidichk
+    - copyloopvar
+    - dupl
+    - gochecknoinits
+    - goconst
+    - loggercheck
+    - makezero
+    - musttag
+    - nestif
+    - nilerr
+    - nilnil
+    - nolintlint
+    - predeclared
+    - sqlclosecheck
+    - tparallel
+    - wastedassign
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    exhaustive:
+      check:
+        - switch
+        - map
+    gocritic:
+      settings:
+        captLocal:
+          paramsOnly: false
+    staticcheck:
+      checks:
+        - all
+        - -ST1000
+        - -ST1016
+        - -QF1008
+
+  exclusions:
+    warn-unused: true
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      - path: '_test\.go'
+        linters:
+          - bodyclose
+          - dupl
+          - errcheck
+          - goconst
+          - gosec
+          - noctx
