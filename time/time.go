@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -65,11 +66,60 @@ type ListTime struct {
 	Timestamps []time.Time `json:"timestamps" validate:"required"`
 }
 
-// TimeShortcutsMap holds the time shortcuts defined in the config.toml
+// registryMu guards concurrent access to the package-level shortcut
+// registries (TimeShortcutsMap, TimeRangeShortcutsMap) via the
+// Register*/Lookup* accessors.
+//
+// BUG-001 / ADR-001: direct writes to the deprecated exported vars below do
+// NOT take this lock — they remain race-prone for backwards compatibility and
+// will be removed in v2.
+var registryMu sync.RWMutex
+
+// TimeShortcutsMap holds the time shortcuts defined in the config.toml.
+//
+// Deprecated: use RegisterTimeShortcut / LookupTimeShortcut instead. Direct
+// access to this map is not thread-safe and will be removed in v2.
 var TimeShortcutsMap = map[string]func() time.Time{}
 
-// TimeRangeShortcutsMap holds the range_offset time shortcuts defined in the config.toml
+// TimeRangeShortcutsMap holds the range_offset time shortcuts defined in the config.toml.
+//
+// Deprecated: use RegisterTimeRangeShortcut / LookupTimeRangeShortcut instead.
+// Direct access to this map is not thread-safe and will be removed in v2.
 var TimeRangeShortcutsMap = map[string]func() RangeTime{}
+
+// RegisterTimeShortcut adds or replaces a single-time shortcut entry under
+// the package-level lock.
+func RegisterTimeShortcut(name string, fn func() time.Time) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	TimeShortcutsMap[name] = fn
+}
+
+// LookupTimeShortcut returns the time-shortcut function registered under name
+// and whether it exists. Safe for concurrent use.
+func LookupTimeShortcut(name string) (func() time.Time, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	fn, ok := TimeShortcutsMap[name]
+	return fn, ok
+}
+
+// RegisterTimeRangeShortcut adds or replaces a range-shortcut entry under
+// the package-level lock.
+func RegisterTimeRangeShortcut(name string, fn func() RangeTime) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	TimeRangeShortcutsMap[name] = fn
+}
+
+// LookupTimeRangeShortcut returns the range-shortcut function registered
+// under name and whether it exists. Safe for concurrent use.
+func LookupTimeRangeShortcut(name string) (func() RangeTime, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	fn, ok := TimeRangeShortcutsMap[name]
+	return fn, ok
+}
 
 // ParseTime takes in the raw time string from the querie and tries parsing it to one of the TimeRangeTypes.
 // 150: The input is lowercased before shortcut map lookups so that
@@ -79,7 +129,8 @@ func ParseTime(timeStr string) (*TimeRange, error) {
 	timeLower := strings.ToLower(timeStr)
 
 	// Check range shortcuts (e.g. 3day, 7day, 10day) before delimiter-based parsing
-	if fn, exists := TimeRangeShortcutsMap[timeLower]; exists {
+	// BUG-001: read via locked accessor.
+	if fn, exists := LookupTimeRangeShortcut(timeLower); exists {
 		rt := fn()
 		return &TimeRange{
 			Type:    TimeTypeRange,
@@ -206,7 +257,8 @@ func parseTimeList(listStr string) (*TimeRange, error) {
 // parseTimeShortcut returns the appropriate time for a given shortcut.
 // 150: Lowercases the shortcut before lookup for case-insensitive matching.
 func parseTimeShortcut(shortcut string) (time.Time, error) {
-	if fn, exists := TimeShortcutsMap[strings.ToLower(shortcut)]; exists {
+	// BUG-001: read via locked accessor.
+	if fn, exists := LookupTimeShortcut(strings.ToLower(shortcut)); exists {
 		return fn(), nil
 	}
 	return time.Time{}, fmt.Errorf("input does not map to valid shortcut")
@@ -368,9 +420,14 @@ func BuildRangeTimeShortcuts(shortcuts map[string]TimeShortcut, log *zap.Sugared
 	return m
 }
 
-// FormatTimeDataToRFC3339 does as the name says
+// FormatTimeDataToRFC3339 does as the name says.
+// BUG-002: on parse error, return the original t unchanged rather than the
+// zero time, so the function never silently produces a zero value.
 func FormatTimeDataToRFC3339(t time.Time) time.Time {
 	formattedTime := t.Format(time.RFC3339)
-	parsed, _ := time.Parse(time.RFC3339, formattedTime)
+	parsed, err := time.Parse(time.RFC3339, formattedTime)
+	if err != nil {
+		return t
+	}
 	return parsed
 }
