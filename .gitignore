@@ -27,3 +27,12 @@ vendor/
 # Vulnerability scan artifacts (produced by CI scripts, not committed)
 osv.txt
 vuln_summary.env
+
+
+.claude/
+CLAUDE.md
+docs/ADR/template.md
+docs/CONVENTIONS.md
+docs/PRD.md
+docs/WORKFLOW.md
+features/
