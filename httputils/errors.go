@@ -90,7 +90,13 @@ func (v *ValidationError) Error() string {
 // SendAPIError writes a structured JSON error response and logs it via Zap.
 // AC-17: Every error response is accompanied by a structured log entry.
 // AC-18: 4xx → Warnw, 5xx → Errorw.
-func SendAPIError(c *gin.Context, logger *zap.SugaredLogger, status int, code, message string, fields ...FieldError) {
+func SendAPIError(
+	c *gin.Context,
+	logger *zap.SugaredLogger,
+	status int,
+	code, message string,
+	fields ...FieldError,
+) {
 	resp := APIError{
 		HTTPStatus: status,
 		Code:       code,
@@ -118,22 +124,16 @@ func SendAPIError(c *gin.Context, logger *zap.SugaredLogger, status int, code, m
 	c.AbortWithStatusJSON(status, resp)
 }
 
-// SendValidationError writes a 400 response with multiple field errors.
-// AC-6: All validation errors returned at once.
+// SendValidationError writes a 400 response with one envelope shape regardless of field count.
+// Top-level always carries VALIDATION_ERROR + a summary; per-field detail lives in errors[].
 func SendValidationError(c *gin.Context, logger *zap.SugaredLogger, fields []FieldError) {
-	// AC-3: Top-level message is a summary.
-	msg := "One or more request parameters are invalid."
+	noun := "parameters"
 	if len(fields) == 1 {
-		msg = fields[0].Message
+		noun = "parameter"
 	}
+	msg := fmt.Sprintf("%d request %s failed validation. See errors[].", len(fields), noun)
 
-	// AC-4: Use VALIDATION_ERROR as top-level code when multiple; use specific code when single.
-	code := CodeValidationError
-	if len(fields) == 1 {
-		code = fields[0].Code
-	}
-
-	SendAPIError(c, logger, 400, code, msg, fields...)
+	SendAPIError(c, logger, 400, CodeValidationError, msg, fields...)
 }
 
 // --- Convenience helpers for common error patterns ---
@@ -176,7 +176,12 @@ func SendQuotaError(c *gin.Context, logger *zap.SugaredLogger, internalErr error
 
 // SendUpstreamError sends a 502 naming the data source but hiding internals.
 // AC-13/AC-14: Names the source but no gRPC codes, HTTP codes, or hostnames.
-func SendUpstreamError(c *gin.Context, logger *zap.SugaredLogger, sourceName string, internalErr error) {
+func SendUpstreamError(
+	c *gin.Context,
+	logger *zap.SugaredLogger,
+	sourceName string,
+	internalErr error,
+) {
 	if logger != nil && internalErr != nil {
 		logger.Errorw("Upstream data source error",
 			"source", sourceName,
@@ -190,32 +195,50 @@ func SendUpstreamError(c *gin.Context, logger *zap.SugaredLogger, sourceName str
 	field := FieldError{
 		Code:    CodeDataSourceUnavail,
 		Field:   strings.ToLower(strings.ReplaceAll(sourceName, " ", "_")),
-		Message: fmt.Sprintf("The %s service is temporarily unavailable.", sourceName),
+		Message: fmt.Sprintf("%s is temporarily unavailable; please retry.", sourceName),
 	}
 
 	c.AbortWithStatusJSON(502, APIError{
 		HTTPStatus: 502,
 		Code:       CodeUpstreamError,
-		Message:    fmt.Sprintf("Data source '%s' is temporarily unavailable.", sourceName),
+		Message:    "Upstream data source unavailable.",
 		Errors:     []FieldError{field},
 	})
 }
 
 // SendInternalError sends a generic 500 with no internal details.
 // AC-15/AC-16: No stack traces, panic details, or function names.
+// If upstream middleware has set the "X-Request-Id" key on the gin.Context,
+// the id is interpolated into the user-facing message and added to the log line.
 func SendInternalError(c *gin.Context, logger *zap.SugaredLogger, internalErr error) {
+	requestID, _ := c.Get("X-Request-Id")
+	requestIDStr, _ := requestID.(string)
+
 	if logger != nil && internalErr != nil {
-		logger.Errorw("Internal server error",
+		fields := []interface{}{
 			"error", internalErr.Error(),
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"clientIP", c.ClientIP(),
+		}
+		if requestIDStr != "" {
+			fields = append(fields, "requestId", requestIDStr)
+		}
+		logger.Errorw("Internal server error", fields...)
+	}
+
+	msg := "An unexpected error occurred. Please try again later."
+	if requestIDStr != "" {
+		msg = fmt.Sprintf(
+			"An unexpected error occurred. Reference request ID %s when contacting support.",
+			requestIDStr,
 		)
 	}
+
 	c.AbortWithStatusJSON(500, APIError{
 		HTTPStatus: 500,
 		Code:       CodeInternalError,
-		Message:    "An unexpected error occurred. Please try again later.",
+		Message:    msg,
 	})
 }
 
