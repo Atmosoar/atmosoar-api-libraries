@@ -162,7 +162,7 @@ func TestSendValidationError_Multiple(t *testing.T) {
 	var resp APIError
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, CodeValidationError, resp.Code)
-	assert.Equal(t, "One or more request parameters are invalid.", resp.Message)
+	assert.Equal(t, "2 request parameters failed validation. See errors[].", resp.Message)
 	assert.Len(t, resp.Errors, 2)
 }
 
@@ -180,8 +180,13 @@ func TestSendValidationError_Single(t *testing.T) {
 
 	var resp APIError
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, CodeInvalidLocation, resp.Code)
-	assert.Equal(t, "Expected lat,lon format.", resp.Message)
+	// Single-field case now uses the same summary shape as multi-field.
+	assert.Equal(t, CodeValidationError, resp.Code)
+	assert.Equal(t, "1 request parameter failed validation. See errors[].", resp.Message)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, CodeInvalidLocation, resp.Errors[0].Code)
+	assert.Equal(t, "location", resp.Errors[0].Field)
+	assert.Equal(t, "Expected lat,lon format.", resp.Errors[0].Message)
 }
 
 // --- Convenience helper tests ---
@@ -224,19 +229,31 @@ func TestSendUpstreamError(t *testing.T) {
 	c, w := setupTestContext()
 	logger := testLogger()
 
-	SendUpstreamError(c, logger, "Weather Data Ingestor", errors.New("gRPC UNAVAILABLE: connection refused"))
+	SendUpstreamError(
+		c,
+		logger,
+		"Weather Data Ingestor",
+		errors.New("gRPC UNAVAILABLE: connection refused"),
+	)
 
 	assert.Equal(t, 502, w.Code)
 
 	var resp APIError
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, CodeUpstreamError, resp.Code)
-	assert.Contains(t, resp.Message, "Weather Data Ingestor")
+	// Top-level message no longer carries the source name — it lives in errors[].
+	assert.Equal(t, "Upstream data source unavailable.", resp.Message)
 	// AC-14: No gRPC codes or hostnames
 	assert.NotContains(t, w.Body.String(), "gRPC")
 	assert.NotContains(t, w.Body.String(), "connection refused")
-	assert.Len(t, resp.Errors, 1)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, CodeDataSourceUnavail, resp.Errors[0].Code)
 	assert.Equal(t, "weather_data_ingestor", resp.Errors[0].Field)
+	assert.Equal(
+		t,
+		"Weather Data Ingestor is temporarily unavailable; please retry.",
+		resp.Errors[0].Message,
+	)
 }
 
 func TestSendInternalError(t *testing.T) {
@@ -251,6 +268,28 @@ func TestSendInternalError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, CodeInternalError, resp.Code)
 	assert.Equal(t, "An unexpected error occurred. Please try again later.", resp.Message)
+	// AC-16: No internal details
+	assert.NotContains(t, w.Body.String(), "nil pointer")
+	assert.NotContains(t, w.Body.String(), "forecastReader")
+}
+
+func TestSendInternalError_WithRequestID(t *testing.T) {
+	c, w := setupTestContext()
+	logger := testLogger()
+	c.Set("X-Request-Id", "req-abc-123")
+
+	SendInternalError(c, logger, errors.New("nil pointer dereference in forecastReader.go:42"))
+
+	assert.Equal(t, 500, w.Code)
+
+	var resp APIError
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, CodeInternalError, resp.Code)
+	assert.Equal(
+		t,
+		"An unexpected error occurred. Reference request ID req-abc-123 when contacting support.",
+		resp.Message,
+	)
 	// AC-16: No internal details
 	assert.NotContains(t, w.Body.String(), "nil pointer")
 	assert.NotContains(t, w.Body.String(), "forecastReader")
