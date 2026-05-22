@@ -111,7 +111,7 @@ func TestTimeParsing(t *testing.T) {
 		{
 			name:        "invalid range format",
 			input:       "invalid/invalid",
-			expectedErr: "invalid time format, expected RFC3339",
+			expectedErr: "unable to parse invalid to RFC3339 time",
 		},
 		{
 			name:        "invalid list format",
