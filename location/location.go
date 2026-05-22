@@ -10,6 +10,8 @@
 package location
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -203,6 +205,15 @@ func ParseLocation(locStr string) (*Location, error) {
 		}, nil
 	}
 
+	// Explicit type-prefixed forms (point:, station:, polyline:, rectangle:,
+	// radius:). The prefix names the location type and is case-insensitive;
+	// the remainder uses the same value grammar as the bare form. This lets
+	// the structured v2 JSON body and the v1 query string share one parser.
+	// bbox: is handled above and intentionally not repeated here.
+	if loc, handled, err := parsePrefixedLocation(locLower, locStr); handled {
+		return loc, err
+	}
+
 	// Check for station ID (WMO format)
 	if isPredefinedStation(locLower) {
 		return &Location{
@@ -266,6 +277,205 @@ func ParseLocation(locStr string) (*Location, error) {
 			Type:    LocationTypePolyline,
 			Payload: PolylineLocation{Coordinates: coords},
 		}, nil
+	}
+}
+
+// parsePrefixedLocation parses an explicit `type:value` location string. It
+// returns handled=false (and a nil error) when locStr carries no recognised
+// type prefix, so ParseLocation can fall through to the bare-form parsers.
+// When handled=true the returned error, if any, is the parse failure.
+func parsePrefixedLocation(lower, original string) (*Location, bool, error) {
+	idx := strings.IndexByte(lower, ':')
+	if idx <= 0 {
+		return nil, false, nil
+	}
+	prefix := lower[:idx]
+	rest := strings.TrimSpace(original[idx+1:])
+
+	switch prefix {
+	case "point":
+		coords, err := parseCoordinates(rest)
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid point %q: %w", rest, err)
+		}
+		if len(coords) != 1 {
+			return nil, true, fmt.Errorf("point requires exactly one lat,lon pair, got %d", len(coords))
+		}
+		return &Location{Type: LocationTypePoint, Payload: coords[0]}, true, nil
+
+	case "station":
+		if pt, ok := LookupStation(strings.ToLower(rest)); ok {
+			return &Location{Type: LocationTypePoint, Payload: pt}, true, nil
+		}
+		return nil, true, fmt.Errorf("unknown station %q", rest)
+
+	case "polyline":
+		// Accept both ';' (documented form) and '|' as point separators.
+		coords, err := parseCoordinates(strings.ReplaceAll(rest, ";", "|"))
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid polyline %q: %w", rest, err)
+		}
+		return &Location{Type: LocationTypePolyline, Payload: PolylineLocation{Coordinates: coords}}, true, nil
+
+	case "rectangle":
+		rect, err := parseRectangleValue(rest)
+		if err != nil {
+			return nil, true, err
+		}
+		return &Location{Type: LocationTypeRectangle, Payload: *rect}, true, nil
+
+	case "radius":
+		rLoc, ok, err := tryParseRadius(rest)
+		if err != nil {
+			return nil, true, err
+		}
+		if !ok {
+			return nil, true, fmt.Errorf("invalid radius %q, expected lat,lon|km", rest)
+		}
+		return &Location{Type: LocationTypeRadius, Payload: *rLoc}, true, nil
+	}
+
+	return nil, false, nil
+}
+
+// parseRectangleValue parses the value half of a `rectangle:` string. It
+// accepts the four-value `south,west,north,east` form as well as the
+// `neLat,neLon|swLat,swLon` two-corner form.
+func parseRectangleValue(s string) (*RectangleLocation, error) {
+	if strings.Contains(s, "|") {
+		coords, err := parseCoordinates(s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid rectangle %q: %w", s, err)
+		}
+		if len(coords) != 2 {
+			return nil, fmt.Errorf("rectangle requires two corner points, got %d", len(coords))
+		}
+		return &RectangleLocation{NorthEast: coords[0], SouthWest: coords[1]}, nil
+	}
+
+	parts := strings.Split(s, ",")
+	if len(parts) != 4 {
+		return nil, fmt.Errorf(
+			"invalid rectangle %q, expected south,west,north,east or neLat,neLon|swLat,swLon", s,
+		)
+	}
+	vals := make([]float64, 4)
+	for i, p := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid rectangle value %q: %w", p, err)
+		}
+		vals[i] = v
+	}
+	return &RectangleLocation{
+		SouthWest: PointLocation{Lat: vals[0], Lon: vals[1]},
+		NorthEast: PointLocation{Lat: vals[2], Lon: vals[3]},
+	}, nil
+}
+
+// UnmarshalJSON decodes a Location from JSON. It accepts two wire forms:
+//
+//   - a string in the v1 query-parameter grammar ("point:55.75,37.6",
+//     "bbox:w,s,e,n", a WMO station id, or a configured shortcut), parsed
+//     via ParseLocation; and
+//   - the structured object {"type":..,"payload":..} produced by the default
+//     marshaller, whose payload is decoded into the concrete payload struct
+//     named by type.
+//
+// Supporting both lets a POST /v2 JSON body accept the same compact strings
+// the GET /v1 query string accepts, without forcing callers to hand-build the
+// structured object. The structured form is decoded into a typed payload so
+// downstream type assertions (ExpandLocations, bbox expansion) succeed.
+func (l *Location) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return fmt.Errorf("location: missing value")
+	}
+
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return fmt.Errorf("location: %w", err)
+		}
+		parsed, err := ParseLocation(s)
+		if err != nil {
+			return fmt.Errorf("location %q: %w", s, err)
+		}
+		*l = *parsed
+		return nil
+	}
+
+	if trimmed[0] == '{' {
+		var raw struct {
+			Type    LocationType    `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(trimmed, &raw); err != nil {
+			return fmt.Errorf("location: %w", err)
+		}
+		payload, err := decodeLocationPayload(raw.Type, raw.Payload)
+		if err != nil {
+			return err
+		}
+		l.Type = raw.Type
+		l.Payload = payload
+		return nil
+	}
+
+	return fmt.Errorf("location: expected a JSON string or a {type,payload} object")
+}
+
+// decodeLocationPayload decodes a raw JSON payload into the concrete payload
+// struct for the given location type.
+func decodeLocationPayload(t LocationType, raw json.RawMessage) (interface{}, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, fmt.Errorf("location: type %q is missing its payload", t)
+	}
+	switch t {
+	case LocationTypePoint:
+		var p PointLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid point payload: %w", err)
+		}
+		return p, nil
+	case LocationTypePointList:
+		var p PointListLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid point_list payload: %w", err)
+		}
+		return p, nil
+	case LocationTypePolyline:
+		var p PolylineLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid polyline payload: %w", err)
+		}
+		return p, nil
+	case LocationTypeRectangle:
+		var p RectangleLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid rectangle payload: %w", err)
+		}
+		return p, nil
+	case LocationTypeRadius:
+		var p RadiusLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid radius payload: %w", err)
+		}
+		return p, nil
+	case LocationTypePolygon:
+		var p PolygonLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid polygon payload: %w", err)
+		}
+		return p, nil
+	case LocationTypeBbox:
+		var p BboxLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid bbox payload: %w", err)
+		}
+		return p, nil
+	default:
+		return nil, fmt.Errorf("location: unknown type %q", t)
 	}
 }
 
