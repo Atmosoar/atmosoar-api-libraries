@@ -17,6 +17,8 @@
 package time
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -143,6 +145,12 @@ func ParseTime(timeStr string) (*TimeRange, error) {
 		return parseTimeList(timeStr)
 	}
 
+	// Try parsing as a slash-delimited range (start/end or start/end/step).
+	// RFC3339 timestamps never contain '/', so the separator is unambiguous.
+	if strings.Contains(timeStr, "/") {
+		return parseTimeRangeSlash(timeStr)
+	}
+
 	// Try parsing as time range (start/end)
 	if strings.Contains(timeStr, ",") {
 		return parseTimeRange(timeStr)
@@ -234,6 +242,222 @@ func parseTimeRange(rangeStr string) (*TimeRange, error) {
 			Timestamps: timestamps,
 		},
 	}, nil
+}
+
+// parseTimeRangeSlash parses a slash-delimited range: "start/end" or
+// "start/end/step". start and end are RFC3339 timestamps; step is either an
+// ISO-8601 duration (e.g. "PT1H") or a bare integer number of hours. A
+// three-part range is expanded into a TimeTypeList of stepped timestamps
+// (end always included); a two-part range becomes a TimeTypeRange.
+func parseTimeRangeSlash(rangeStr string) (*TimeRange, error) {
+	parts := strings.Split(rangeStr, "/")
+	if len(parts) != 2 && len(parts) != 3 {
+		return nil, fmt.Errorf("invalid time range %q, expected start/end or start/end/step", rangeStr)
+	}
+
+	start, err := time.Parse(time.RFC3339, strings.TrimSpace(parts[0]))
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse %s to RFC3339 time", parts[0])
+	}
+	end, err := time.Parse(time.RFC3339, strings.TrimSpace(parts[1]))
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse %s to RFC3339 time", parts[1])
+	}
+	if !end.After(start) {
+		return nil, fmt.Errorf("end time must be after start time")
+	}
+
+	if len(parts) == 2 {
+		return &TimeRange{
+			Type:    TimeTypeRange,
+			Payload: RangeTime{Start: start, End: end, Resolution: 0},
+		}, nil
+	}
+
+	step, err := parseStepDuration(strings.TrimSpace(parts[2]))
+	if err != nil {
+		return nil, err
+	}
+
+	timestamps := make([]time.Time, 0)
+	for t := start; !t.After(end); t = t.Add(step) {
+		timestamps = append(timestamps, t.UTC())
+	}
+	// Include the end boundary when the step does not divide the span evenly.
+	if len(timestamps) == 0 || !timestamps[len(timestamps)-1].Equal(end.UTC()) {
+		timestamps = append(timestamps, end.UTC())
+	}
+
+	return &TimeRange{
+		Type:    TimeTypeList,
+		Payload: ListTime{Timestamps: timestamps},
+	}, nil
+}
+
+// parseStepDuration parses a range step expressed either as an ISO-8601
+// duration ("PT1H", "PT30M", "P1DT12H") or as a bare positive integer number
+// of hours ("1", "6"). The returned duration is always strictly positive.
+func parseStepDuration(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, fmt.Errorf("missing range step")
+	}
+	if strings.HasPrefix(strings.ToUpper(s), "P") {
+		return parseISO8601Duration(strings.ToUpper(s))
+	}
+	hours, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"invalid range step %q, expected an ISO-8601 duration (e.g. PT1H) or integer hours", s,
+		)
+	}
+	if hours <= 0 {
+		return 0, fmt.Errorf("range step hours must be a positive integer")
+	}
+	return time.Duration(hours) * time.Hour, nil
+}
+
+// parseISO8601Duration parses the subset of ISO-8601 durations Atmosoar uses
+// for range steps: weeks, days, hours, minutes, and seconds. Month and year
+// designators are intentionally rejected because their length is ambiguous.
+// The input is expected to be upper-cased and to start with 'P'.
+func parseISO8601Duration(s string) (time.Duration, error) {
+	rest := strings.TrimPrefix(s, "P")
+	if rest == "" {
+		return 0, fmt.Errorf("invalid ISO-8601 duration %q", s)
+	}
+
+	datePart, timePart := rest, ""
+	if i := strings.IndexByte(rest, 'T'); i >= 0 {
+		datePart, timePart = rest[:i], rest[i+1:]
+	}
+
+	var total time.Duration
+	accumulate := func(part string, units map[byte]time.Duration) error {
+		var num strings.Builder
+		for i := 0; i < len(part); i++ {
+			ch := part[i]
+			if ch >= '0' && ch <= '9' {
+				num.WriteByte(ch)
+				continue
+			}
+			unit, ok := units[ch]
+			if !ok {
+				return fmt.Errorf("invalid ISO-8601 duration %q: unsupported designator %q", s, string(ch))
+			}
+			if num.Len() == 0 {
+				return fmt.Errorf("invalid ISO-8601 duration %q: designator %q has no value", s, string(ch))
+			}
+			n, err := strconv.Atoi(num.String())
+			if err != nil {
+				return fmt.Errorf("invalid ISO-8601 duration %q: %w", s, err)
+			}
+			total += time.Duration(n) * unit
+			num.Reset()
+		}
+		if num.Len() != 0 {
+			return fmt.Errorf("invalid ISO-8601 duration %q: trailing value with no designator", s)
+		}
+		return nil
+	}
+
+	if err := accumulate(datePart, map[byte]time.Duration{
+		'W': 7 * 24 * time.Hour,
+		'D': 24 * time.Hour,
+	}); err != nil {
+		return 0, err
+	}
+	if err := accumulate(timePart, map[byte]time.Duration{
+		'H': time.Hour,
+		'M': time.Minute,
+		'S': time.Second,
+	}); err != nil {
+		return 0, err
+	}
+	if total <= 0 {
+		return 0, fmt.Errorf("ISO-8601 duration %q must be a positive, non-zero duration", s)
+	}
+	return total, nil
+}
+
+// UnmarshalJSON decodes a TimeRange from JSON. It accepts two wire forms:
+//
+//   - a string in the v1 query-parameter grammar (an RFC3339 timestamp, a
+//     "start/end/step" or "start,end,resolution" range, a pipe-delimited
+//     list, or a configured shortcut such as "now"), parsed via ParseTime;
+//     and
+//   - the structured object {"type":..,"payload":..} produced by the default
+//     marshaller, whose payload is decoded into the concrete payload struct
+//     named by type.
+//
+// Supporting both lets a POST /v2 JSON body accept the same compact strings
+// the GET /v1 query string accepts.
+func (tr *TimeRange) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return fmt.Errorf("timeRange: missing value")
+	}
+
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return fmt.Errorf("timeRange: %w", err)
+		}
+		parsed, err := ParseTime(s)
+		if err != nil {
+			return fmt.Errorf("timeRange %q: %w", s, err)
+		}
+		*tr = *parsed
+		return nil
+	}
+
+	if trimmed[0] == '{' {
+		var raw struct {
+			Type    TimeRangeType   `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(trimmed, &raw); err != nil {
+			return fmt.Errorf("timeRange: %w", err)
+		}
+		payload, err := decodeTimePayload(raw.Type, raw.Payload)
+		if err != nil {
+			return err
+		}
+		tr.Type = raw.Type
+		tr.Payload = payload
+		return nil
+	}
+
+	return fmt.Errorf("timeRange: expected a JSON string or a {type,payload} object")
+}
+
+// decodeTimePayload decodes a raw JSON payload into the concrete payload
+// struct for the given time range type.
+func decodeTimePayload(t TimeRangeType, raw json.RawMessage) (interface{}, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, fmt.Errorf("timeRange: type %q is missing its payload", t)
+	}
+	switch t {
+	case TimeTypeSingle:
+		var p SingleTime
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("timeRange: invalid single payload: %w", err)
+		}
+		return p, nil
+	case TimeTypeRange:
+		var p RangeTime
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("timeRange: invalid range payload: %w", err)
+		}
+		return p, nil
+	case TimeTypeList:
+		var p ListTime
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("timeRange: invalid list payload: %w", err)
+		}
+		return p, nil
+	default:
+		return nil, fmt.Errorf("timeRange: unknown type %q", t)
+	}
 }
 
 func parseTimeList(listStr string) (*TimeRange, error) {
