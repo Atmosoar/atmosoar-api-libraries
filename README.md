@@ -56,6 +56,11 @@ go test ./...
 golangci-lint run
 ```
 
+**Go version policy:** the `go` directive in `go.mod` is the single source of
+truth for the Go version; CI derives from it via `actions/setup-go` with
+`go-version-file: go.mod` — never hardcode a Go version in workflow files.
+(This repo ships no Dockerfile, so there is nothing else to keep in sync.)
+
 ## Versioning
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
