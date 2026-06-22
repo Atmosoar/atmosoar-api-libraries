@@ -28,9 +28,6 @@ vendor/
 osv.txt
 vuln_summary.env
 
-
-
-DEVELOPMENT.md
 docs/ADR/template.md
 docs/CONVENTIONS.md
 docs/PRD.md
