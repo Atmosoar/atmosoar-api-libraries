@@ -23,7 +23,7 @@ Create or update an ADR when any of these phrases come up in the session:
 
 - Implementation detail within a single module
 - Obvious choices with no real alternatives
-- Style/naming preferences (those belong in `docs/`)
+- Style/naming preferences (those belong in `.claude/rules/`)
 - Decisions already covered by an existing ADR (amend or supersede instead)
 
 ## ADR Index
