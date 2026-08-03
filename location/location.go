@@ -106,6 +106,55 @@ type BboxLocation struct {
 	Density int     `json:"density"` // points per degree (0 = use config default)
 }
 
+// Expansion limits.
+//
+// A radius or polyline location is expanded into a flat []PointLocation, and
+// both grammars let a very short query string ask for a very long list. The
+// limits below are therefore enforced at PARSE time — where the caller gets a
+// clean 400-style error — rather than at expansion time, where the allocation
+// has already happened.
+//
+// Memory math (a PointLocation is two float64 = 16 bytes):
+//
+//   - Radius: ExpandLocations lays down one ring every radiusRingStepKm and
+//     ring k carries 3+k points, so a radius of R km yields
+//     3*n*(n+1)/2 points with n = floor(R)/radiusRingStepKm + 1 — quadratic
+//     in R, and pre-allocated in a single make() before any weather data is
+//     read. An unvalidated "0,0|40000" gives n = 13334 → ~267M points ≈
+//     4.27 GB, i.e. a one-request OOM. MaxRadiusKm caps n at 57 →
+//     3*57*58/2 = 4,959 points ≈ 79 KB.
+//
+//   - Polyline: the 5-value form "startLat,startLon,endLat,endLon,count"
+//     generates `count` points from ~30 characters of input, and segments
+//     chain with '|' so the amplification compounds. An unvalidated count of
+//     2000000000 pre-allocates ~32 GB. MaxPolylinePoints caps a whole
+//     polyline location at 2000 points ≈ 32 KB.
+//
+// The point counts are also what every downstream consumer fans out over
+// (MMA issues per-location upstream lookups), so the caps are deliberately
+// tighter than raw memory alone would demand.
+const (
+	// MaxRadiusKm is the largest radius, in kilometres, accepted for a
+	// "lat,lon|radiusKm" location. 170 km is far beyond any drone mission
+	// and generous for a regional weather sweep.
+	MaxRadiusKm = 170.0
+
+	// MaxExpandedRadiusPoints is the hard ceiling on the number of points a
+	// single radius expansion may produce. It is the belt-and-braces backstop
+	// for MaxRadiusKm — at MaxRadiusKm the closed form yields 4,959 points, so
+	// this bound is never the binding one for a parsed location.
+	MaxExpandedRadiusPoints = 5000
+
+	// MaxPolylinePoints is the largest number of points a single polyline
+	// location may parse to. It bounds both the generated 5-value form and
+	// the total across '|'-chained segments.
+	MaxPolylinePoints = 2000
+
+	// radiusRingStepKm is the spacing between the concentric rings that
+	// ExpandLocations generates for a radius location.
+	radiusRingStepKm = 3
+)
+
 // registryMu guards concurrent access to the package-level registries
 // (LocationShortcutsMap, StationMap, ActiveShapeProvider) via the
 // Register*/Lookup*/SetShapeProvider/ShapeProvider accessors.
@@ -461,6 +510,13 @@ func decodeLocationPayload(t LocationType, raw json.RawMessage) (interface{}, er
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("location: invalid radius payload: %w", err)
 		}
+		// The structured payload bypasses tryParseRadius entirely, so the
+		// expansion bound has to be re-applied here — otherwise
+		// {"type":"radius","payload":{"radius":40000}} is an un-capped
+		// multi-gigabyte allocation.
+		if err := validateRadius(p.Radius); err != nil {
+			return nil, fmt.Errorf("location: invalid radius payload: %w", err)
+		}
 		return p, nil
 	case LocationTypePolygon:
 		var p PolygonLocation
@@ -559,11 +615,29 @@ func tryParseRadius(s string) (*RadiusLocation, bool, error) {
 	if err3 != nil {
 		return nil, true, fmt.Errorf("invalid radius: %w", err3)
 	}
-	if radius <= 0 {
-		return nil, true, fmt.Errorf("radius must be > 0 km")
+	if err := validateRadius(radius); err != nil {
+		return nil, true, err
 	}
 
 	return &RadiusLocation{Lat: lat, Lon: lon, Radius: radius}, true, nil
+}
+
+// validateRadius applies the parse-time radius bounds shared by the query
+// grammar (tryParseRadius) and the structured JSON payload path
+// (decodeLocationPayload). Both must reject an oversized radius here, because
+// ExpandLocations pre-allocates a point slice that grows with the square of
+// the radius (see the MaxRadiusKm comment).
+func validateRadius(radius float64) error {
+	// NaN satisfies neither comparison below, so it is rejected explicitly —
+	// it would otherwise reach int(math.Floor(NaN)) in ExpandLocations, whose
+	// result is implementation-defined.
+	if math.IsNaN(radius) || radius <= 0 {
+		return fmt.Errorf("radius must be > 0 km")
+	}
+	if radius > MaxRadiusKm {
+		return fmt.Errorf("radius must be <= %g km, got %g", MaxRadiusKm, radius)
+	}
+	return nil
 }
 
 // parseBbox parses "west,south,east,north" into a BboxLocation.
@@ -691,6 +765,11 @@ func parseCoordinates(coordStr string) ([]PointLocation, error) {
 			if err != nil || pointCount < 2 {
 				return nil, fmt.Errorf("point count must be integer >= 2")
 			}
+			// The count is the amplification vector: ~30 characters of input
+			// otherwise buys an arbitrarily long slice in generatePoints.
+			if pointCount > MaxPolylinePoints {
+				return nil, fmt.Errorf("point count must be <= %d, got %d", MaxPolylinePoints, pointCount)
+			}
 
 			// Generate intermediate points
 			generated, err := generatePoints(
@@ -708,6 +787,13 @@ func parseCoordinates(coordStr string) ([]PointLocation, error) {
 				"invalid coordinate format %s, expected either 2 (lat-lon for a point) or 5 (start lat-lon, end-lan-lon, resolution for a polyline) or a shortcut coseparated values optionally seperated with a pipe",
 				coordStr,
 			)
+		}
+
+		// Per-segment caps are not enough on their own: '|' chains segments,
+		// so N generated segments multiply. Checking the running total after
+		// every segment bounds the peak allocation at 2*MaxPolylinePoints.
+		if len(coords) > MaxPolylinePoints {
+			return nil, fmt.Errorf("location expands to more than %d points", MaxPolylinePoints)
 		}
 	}
 
@@ -905,24 +991,34 @@ func ExpandLocations(loc Location) []PointLocation {
 			rad = v
 		}
 		if rad != nil {
-			// If radius < 3 km → only the center point
-			if rad.Radius < 3.0 {
+			// If radius < 3 km → only the center point.
+			// NaN satisfies no ordered comparison, so it is tested explicitly
+			// here rather than being allowed to reach int(math.Floor(NaN)).
+			if math.IsNaN(rad.Radius) || rad.Radius < radiusRingStepKm {
 				return []PointLocation{{Lat: rad.Lat, Lon: rad.Lon}}
 			}
 
-			// Build rings every 3 km; ring k has 3 + k points
+			// Defence in depth: validateRadius rejects anything above
+			// MaxRadiusKm at parse time, but ExpandLocations has no error
+			// return, so a hand-built Location (or a future payload path that
+			// forgets to validate) must still be unable to pre-allocate
+			// gigabytes here. Clamping to MaxRadiusKm — and bounding the loop
+			// by MaxExpandedRadiusPoints — is strictly safer than an OOM.
+			radiusKm := math.Min(rad.Radius, MaxRadiusKm)
+
+			// Build rings every radiusRingStepKm; ring k has 3 + k points
 			// BUG-004:
 			//   1) Pre-size pts using the closed-form sum of ring sizes.
 			//      For k = 0, 3, 6, …, 3*K (K = maxKm/3) ring sizes are
 			//      3, 6, 9, …, 3*(K+1). Sum = 3 * n * (n+1) / 2 where n = K+1.
 			//   2) Hoist sin/cos(angDist) out of the inner bearing loop —
 			//      angDist depends only on k.
-			maxKm := int(math.Floor(rad.Radius))
-			ringCount := maxKm/3 + 1
+			maxKm := int(math.Floor(radiusKm))
+			ringCount := maxKm/radiusRingStepKm + 1
 			capacity := 3 * ringCount * (ringCount + 1) / 2
 			pts := make([]PointLocation, 0, capacity)
 
-			for k := 0; k <= maxKm; k += 3 {
+			for k := 0; k <= maxKm && len(pts) < MaxExpandedRadiusPoints; k += radiusRingStepKm {
 				n := 3 + k
 				step := 360.0 / float64(n)
 				angDist := float64(k) / earthRadiusKm

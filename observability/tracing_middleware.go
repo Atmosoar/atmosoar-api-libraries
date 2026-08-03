@@ -2,6 +2,8 @@ package observability
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel"
@@ -10,6 +12,58 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// sensitiveQueryParams are query parameters whose values must never reach a
+// span attribute. `access_token` is the load-bearing one: EventSource cannot
+// set an Authorization header, so SSE endpoints (e.g. /impact/v1/stream) pass
+// a real bearer token in the query string. Recording it verbatim would persist
+// live credentials in the trace backend, where they outlive the request and
+// are readable by anyone with dashboard access.
+//
+//nolint:gochecknoglobals // fixed lookup table
+var sensitiveQueryParams = map[string]bool{
+	"access_token":  true,
+	"token":         true,
+	"refresh_token": true,
+	"id_token":      true,
+	"code":          true,
+	"client_secret": true,
+	"api_key":       true,
+	"apikey":        true,
+}
+
+// redactedURL renders a URL with the values of sensitive query parameters
+// replaced by "REDACTED". The parameter NAMES are preserved so traces still
+// show the shape of the request. A URL whose query cannot be parsed is
+// reduced to its path, which is the safe direction to fail.
+func redactedURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.RawQuery == "" {
+		return u.String()
+	}
+
+	values, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return u.Path
+	}
+
+	redacted := false
+	for key := range values {
+		if sensitiveQueryParams[strings.ToLower(key)] {
+			values.Set(key, "REDACTED")
+			redacted = true
+		}
+	}
+	if !redacted {
+		return u.String()
+	}
+
+	clone := *u
+	clone.RawQuery = values.Encode()
+	return clone.String()
+}
 
 // tracingConfig holds TracingMiddleware options.
 type tracingConfig struct {
@@ -85,7 +139,7 @@ func TracingMiddleware(skipPaths []string, opts ...TracingOption) gin.HandlerFun
 		span.SetAttributes(
 			attribute.String("http.method", c.Request.Method),
 			attribute.String("http.route", route),
-			attribute.String("http.url", c.Request.URL.String()),
+			attribute.String("http.url", redactedURL(c.Request.URL)),
 		)
 
 		c.Next()

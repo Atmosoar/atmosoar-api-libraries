@@ -2,6 +2,7 @@ package observability
 
 import (
 	"net/http"
+	"net/url"
 	"net/http/httptest"
 	"testing"
 
@@ -54,5 +55,34 @@ func TestTracingMiddleware_WithoutRemoteExtraction(t *testing.T) {
 	}
 	if got == "00000000000000000000000000000000" || got == "" {
 		t.Fatalf("expected a valid new trace id, got %q", got)
+	}
+}
+
+func TestRedactedURL(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"no query untouched", "/impact/v1/stream", "/impact/v1/stream"},
+		{"access_token redacted", "/impact/v1/stream?access_token=eyJhbGciOi.secret.sig&days=3",
+			"/impact/v1/stream?access_token=REDACTED&days=3"},
+		{"case-insensitive param name", "/x?Access_Token=secret", "/x?Access_Token=REDACTED"},
+		{"other params preserved", "/x?location=1,2&token=abc", "/x?location=1%2C2&token=REDACTED"},
+		{"benign query untouched verbatim", "/x?location=1,2", "/x?location=1,2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.raw)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := redactedURL(u); got != tc.want {
+				t.Errorf("redactedURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+	if got := redactedURL(nil); got != "" {
+		t.Errorf("redactedURL(nil) = %q, want empty", got)
 	}
 }
