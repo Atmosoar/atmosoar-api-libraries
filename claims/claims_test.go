@@ -3,13 +3,19 @@ package claims
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
-func init() { gin.SetMode(gin.TestMode) }
+// Package-level setup for a test binary belongs in TestMain; an init() in a
+// _test.go file is what gochecknoinits flags.
+func TestMain(m *testing.M) {
+	gin.SetMode(gin.TestMode)
+	os.Exit(m.Run())
+}
 
 func testLogger() *zap.SugaredLogger { return zap.NewNop().Sugar() }
 

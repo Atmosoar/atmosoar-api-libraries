@@ -23,6 +23,8 @@ import (
 // semantics, and which typed getter applies.
 type Kind string
 
+// The supported Kind values. Each maps a config key to its JSON encoding and
+// the typed getter that reads it.
 const (
 	KindInt      Kind = "int"      // JSON number (integral); getter Int/Int64
 	KindFloat    Kind = "float"    // JSON number; getter Float
@@ -39,8 +41,9 @@ type Bounds struct {
 	Max *float64 `json:"max,omitempty"`
 }
 
-// FloatBounds is a convenience constructor.
-func FloatBounds(min, max float64) *Bounds { return &Bounds{Min: &min, Max: &max} }
+// FloatBounds is a convenience constructor. The parameters are named lo/hi
+// rather than min/max so they do not shadow the min/max builtins.
+func FloatBounds(lo, hi float64) *Bounds { return &Bounds{Min: &lo, Max: &hi} }
 
 // Key declares one runtime-tunable configuration value.
 type Key struct {
