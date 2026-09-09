@@ -3,6 +3,7 @@ package runtimeconfig
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -104,10 +105,10 @@ func TestValidationRejects(t *testing.T) {
 func TestImmutableAndUnknown(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
-	if err := m.Apply(ctx, "dem_mode", json.RawMessage(`"flat"`)); err != ErrImmutable {
+	if err := m.Apply(ctx, "dem_mode", json.RawMessage(`"flat"`)); !errors.Is(err, ErrImmutable) {
 		t.Fatalf("expected ErrImmutable, got %v", err)
 	}
-	if err := m.Apply(ctx, "nope", json.RawMessage(`1`)); err != ErrUnknownKey {
+	if err := m.Apply(ctx, "nope", json.RawMessage(`1`)); !errors.Is(err, ErrUnknownKey) {
 		t.Fatalf("expected ErrUnknownKey, got %v", err)
 	}
 }
