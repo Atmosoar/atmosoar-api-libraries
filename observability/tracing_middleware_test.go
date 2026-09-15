@@ -2,8 +2,8 @@ package observability
 
 import (
 	"net/http"
-	"net/url"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -77,12 +77,12 @@ func TestRedactedURL(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			if got := redactedURL(u); got != tc.want {
-				t.Errorf("redactedURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			if got := RedactURL(u); got != tc.want {
+				t.Errorf("RedactURL(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
 	}
-	if got := redactedURL(nil); got != "" {
-		t.Errorf("redactedURL(nil) = %q, want empty", got)
+	if got := RedactURL(nil); got != "" {
+		t.Errorf("RedactURL(nil) = %q, want empty", got)
 	}
 }
