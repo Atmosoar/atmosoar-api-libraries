@@ -68,6 +68,27 @@ type ListTime struct {
 	Timestamps []time.Time `json:"timestamps" validate:"required"`
 }
 
+// MaxTimestamps caps how many timestamps a single time parameter may expand
+// to. Like the location package's expansion caps it is enforced at PARSE
+// time, so an oversized range is a clean 400-style error instead of an
+// allocation the process cannot survive.
+//
+// Memory math (a time.Time is 24 bytes — wall, ext, loc):
+//
+//   - "start,end,resolution" walks 0..resolution and appends one timestamp
+//     per step, with only a `resolution <= 0` guard. resolution=100000000
+//     grows the slice to ~2.4 GB.
+//   - "start/end/PT1S" steps the span at one second regardless of its
+//     length: 1980→2050 is ~2.2e9 timestamps ≈ 53 GB.
+//   - ExpandTimes does make([]time.Time, 0, res+1) from a JSON-decoded
+//     RangeTime.Resolution that nothing validated; res = 2^60 is not a slow
+//     allocation but an outright makeslice panic.
+//
+// 10,000 is over a year of hourly steps (8,760) and ~240 KB expanded — far
+// beyond /impact's days=10 (241 hourly slots) yet cheap in both memory and
+// downstream per-timestamp work.
+const MaxTimestamps = 10000
+
 // registryMu guards concurrent access to the package-level shortcut
 // registries (TimeShortcutsMap, TimeRangeShortcutsMap) via the
 // Register*/Lookup* accessors.
@@ -215,6 +236,11 @@ func parseTimeRange(rangeStr string) (*TimeRange, error) {
 	if resolution <= 0 {
 		return nil, fmt.Errorf("resolution must be a positive integer")
 	}
+	// The loop below emits resolution+1 timestamps, so the cap has to be
+	// checked before it runs — not after the slice has already grown.
+	if resolution >= MaxTimestamps {
+		return nil, fmt.Errorf("resolution must be < %d, got %d", MaxTimestamps, resolution)
+	}
 
 	// Calculate the time points based on resolution
 	duration := end.Sub(start)
@@ -223,7 +249,7 @@ func parseTimeRange(rangeStr string) (*TimeRange, error) {
 	}
 
 	step := duration / time.Duration(resolution)
-	var timestamps []time.Time
+	timestamps := make([]time.Time, 0, resolution+1)
 
 	current := start
 	for i := 0; i <= resolution; i++ {
@@ -279,7 +305,19 @@ func parseTimeRangeSlash(rangeStr string) (*TimeRange, error) {
 		return nil, err
 	}
 
-	timestamps := make([]time.Time, 0)
+	// The step is caller-supplied and the span is unbounded, so
+	// "1980-01-01/2050-01-01/PT1S" would otherwise walk ~2.2e9 iterations,
+	// appending until the process dies. Size the expansion up front and
+	// reject it here instead.
+	count := int64(end.Sub(start)/step) + 1
+	if count > MaxTimestamps {
+		return nil, fmt.Errorf(
+			"time range %q expands to %d timestamps, more than the %d maximum; use a coarser step",
+			rangeStr, count, MaxTimestamps,
+		)
+	}
+
+	timestamps := make([]time.Time, 0, count+1)
 	for t := start; !t.After(end); t = t.Add(step) {
 		timestamps = append(timestamps, t.UTC())
 	}
@@ -448,11 +486,25 @@ func decodeTimePayload(t TimeRangeType, raw json.RawMessage) (interface{}, error
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("timeRange: invalid range payload: %w", err)
 		}
+		// The structured payload bypasses parseTimeRange, so ExpandTimes
+		// would be the first code to see Resolution — and its make() with a
+		// caller-chosen capacity panics rather than erroring.
+		if p.Resolution >= MaxTimestamps {
+			return nil, fmt.Errorf(
+				"timeRange: resolution must be < %d, got %d", MaxTimestamps, p.Resolution,
+			)
+		}
 		return p, nil
 	case TimeTypeList:
 		var p ListTime
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("timeRange: invalid list payload: %w", err)
+		}
+		if len(p.Timestamps) > MaxTimestamps {
+			return nil, fmt.Errorf(
+				"timeRange: list has %d entries, more than the %d maximum",
+				len(p.Timestamps), MaxTimestamps,
+			)
 		}
 		return p, nil
 	default:
@@ -462,7 +514,12 @@ func decodeTimePayload(t TimeRangeType, raw json.RawMessage) (interface{}, error
 
 func parseTimeList(listStr string) (*TimeRange, error) {
 	timeStrs := strings.Split(listStr, "|")
-	var times []time.Time
+	if len(timeStrs) > MaxTimestamps {
+		return nil, fmt.Errorf(
+			"time list has %d entries, more than the %d maximum", len(timeStrs), MaxTimestamps,
+		)
+	}
+	times := make([]time.Time, 0, len(timeStrs))
 
 	for _, ts := range timeStrs {
 		t, err := time.Parse(time.RFC3339, ts)
@@ -524,30 +581,44 @@ func ExpandTimes(tr TimeRange) []time.Time {
 			rt = v
 		}
 		if rt != nil {
-			start, end, res := rt.Start, rt.End, rt.Resolution
-			if !end.After(start) {
-				// Non-positive span → return start only
-				return []time.Time{start}
-			}
-			// If res is the number of segments, we return res+1 points (inclusive).
-			if res <= 0 {
-				return []time.Time{start, end}
-			}
-			step := end.Sub(start) / time.Duration(res)
-			out := make([]time.Time, 0, res+1)
-			cur := start
-			for i := 0; i <= res; i++ {
-				if i == res {
-					out = append(out, end.UTC())
-				} else {
-					out = append(out, cur.UTC())
-					cur = cur.Add(step)
-				}
-			}
-			return out
+			return expandRangeTime(*rt)
 		}
 	}
 	return nil
+}
+
+// expandRangeTime turns a RangeTime into its inclusive list of timestamps.
+// Split out of ExpandTimes so the range arm stays flat and readable.
+func expandRangeTime(rt RangeTime) []time.Time {
+	start, end, res := rt.Start, rt.End, rt.Resolution
+	if !end.After(start) {
+		// Non-positive span → return start only
+		return []time.Time{start}
+	}
+	// If res is the number of segments, we return res+1 points (inclusive).
+	if res <= 0 {
+		return []time.Time{start, end}
+	}
+	// Defence in depth: decodeTimePayload rejects an oversized Resolution at
+	// parse time, but this function has no error return and a hand-built
+	// RangeTime must not be able to ask make() for 2^60 elements — that is a
+	// hard runtime panic, not an error. Clamping yields a coarser expansion,
+	// which beats crashing.
+	if res >= MaxTimestamps {
+		res = MaxTimestamps - 1
+	}
+	step := end.Sub(start) / time.Duration(res)
+	out := make([]time.Time, 0, res+1)
+	cur := start
+	for i := 0; i <= res; i++ {
+		if i == res {
+			out = append(out, end.UTC())
+		} else {
+			out = append(out, cur.UTC())
+			cur = cur.Add(step)
+		}
+	}
+	return out
 }
 
 // --- Shortcut builders (formerly middleware/config/shortcut_builder.go) ---

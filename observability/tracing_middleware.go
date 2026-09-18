@@ -14,6 +14,7 @@ import (
 // tracingConfig holds TracingMiddleware options.
 type tracingConfig struct {
 	extractRemote bool
+	pathRedactor  PathRedactor
 }
 
 // TracingOption configures TracingMiddleware.
@@ -26,6 +27,14 @@ type TracingOption func(*tracingConfig)
 // instead of starting a disconnected root span.
 func WithoutRemoteExtraction() TracingOption {
 	return func(c *tracingConfig) { c.extractRemote = false }
+}
+
+// WithPathRedactor rewrites the request path before it is recorded in the
+// span's http.url attribute. Use it when a route carries a credential as a
+// path segment (e.g. a device upload token), which query-parameter redaction
+// cannot see.
+func WithPathRedactor(redact PathRedactor) TracingOption {
+	return func(c *tracingConfig) { c.pathRedactor = redact }
 }
 
 // TracingMiddleware returns a Gin middleware that creates a span for each
@@ -85,7 +94,7 @@ func TracingMiddleware(skipPaths []string, opts ...TracingOption) gin.HandlerFun
 		span.SetAttributes(
 			attribute.String("http.method", c.Request.Method),
 			attribute.String("http.route", route),
-			attribute.String("http.url", c.Request.URL.String()),
+			attribute.String("http.url", RedactURLWithPath(c.Request.URL, cfg.pathRedactor)),
 		)
 
 		c.Next()

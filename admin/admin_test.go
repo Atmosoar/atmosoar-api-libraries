@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,12 @@ import (
 	"atmosoar.io/atmosoar-api-libraries/runtimeconfig"
 )
 
-func init() { gin.SetMode(gin.TestMode) }
+// Package-level setup for a test binary belongs in TestMain; an init() in a
+// _test.go file is what gochecknoinits flags.
+func TestMain(m *testing.M) {
+	gin.SetMode(gin.TestMode)
+	os.Exit(m.Run())
+}
 
 func testManager() *runtimeconfig.Manager {
 	reg := runtimeconfig.NewRegistry().
@@ -99,11 +105,23 @@ func TestConfigCRUD(t *testing.T) {
 		t.Fatalf("put valid: %d body=%s", w.Code, w.Body.String())
 	}
 	// out of bounds -> 400
-	if w := do(r, http.MethodPut, "/admin/test/config/max_results", `{"value": 999999}`, true); w.Code != http.StatusBadRequest {
+	if w := do(
+		r,
+		http.MethodPut,
+		"/admin/test/config/max_results",
+		`{"value": 999999}`,
+		true,
+	); w.Code != http.StatusBadRequest {
 		t.Fatalf("put oob: want 400 got %d", w.Code)
 	}
 	// immutable -> 409
-	if w := do(r, http.MethodPut, "/admin/test/config/dem_mode", `{"value": "flat"}`, true); w.Code != http.StatusConflict {
+	if w := do(
+		r,
+		http.MethodPut,
+		"/admin/test/config/dem_mode",
+		`{"value": "flat"}`,
+		true,
+	); w.Code != http.StatusConflict {
 		t.Fatalf("put immutable: want 409 got %d", w.Code)
 	}
 	// unknown -> 404
@@ -130,13 +148,25 @@ func TestFlags(t *testing.T) {
 	fs := NewFlagSet(runtimeconfig.NewMemStore(), zap.NewNop().Sugar(),
 		[]Flag{{Name: "disable_upstream", Default: false, Description: "kill switch"}})
 	r2 := setupEngine(t, fs)
-	if w := do(r2, http.MethodPost, "/admin/test/flags/disable_upstream", `{"value":true}`, true); w.Code != http.StatusOK {
+	if w := do(
+		r2,
+		http.MethodPost,
+		"/admin/test/flags/disable_upstream",
+		`{"value":true}`,
+		true,
+	); w.Code != http.StatusOK {
 		t.Fatalf("toggle known: %d body=%s", w.Code, w.Body.String())
 	}
 	if !fs.Enabled("disable_upstream") {
 		t.Fatal("flag not enabled after toggle")
 	}
-	if w := do(r2, http.MethodPost, "/admin/test/flags/unknown", `{"value":true}`, true); w.Code != http.StatusNotFound {
+	if w := do(
+		r2,
+		http.MethodPost,
+		"/admin/test/flags/unknown",
+		`{"value":true}`,
+		true,
+	); w.Code != http.StatusNotFound {
 		t.Fatalf("toggle unknown: want 404 got %d", w.Code)
 	}
 }
