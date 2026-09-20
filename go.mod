@@ -14,7 +14,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.27.1
-	golang.org/x/image v0.36.0
+	golang.org/x/image v0.39.0
 )
 
 require (
