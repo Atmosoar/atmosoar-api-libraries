@@ -60,6 +60,20 @@ func ParseFormat(s string) (Format, bool) {
 	}
 }
 
+// ParseMode recognises a colour-mode name, in any case, so every service reads
+// the same `theme` query parameter. The second return is false for anything
+// else, which callers treat as "leave the spec's mode alone".
+func ParseMode(s string) (Mode, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "light":
+		return ModeLight, true
+	case "dark":
+		return ModeDark, true
+	default:
+		return "", false
+	}
+}
+
 // Encode renders a spec in one format and reports the content type to serve it
 // with. It is the whole integration surface a service needs.
 func Encode(s Spec, f Format) (data []byte, contentType string, err error) {
