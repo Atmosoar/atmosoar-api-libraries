@@ -121,8 +121,8 @@ type BboxLocation struct {
 //     3*n*(n+1)/2 points with n = floor(R)/radiusRingStepKm + 1 — quadratic
 //     in R, and pre-allocated in a single make() before any weather data is
 //     read. An unvalidated "0,0|40000" gives n = 13334 → ~267M points ≈
-//     4.27 GB, i.e. a one-request OOM. MaxRadiusKm caps n at 57 →
-//     3*57*58/2 = 4,959 points ≈ 79 KB.
+//     4.27 GB, i.e. a one-request OOM. MaxRadiusKm caps n at 67 →
+//     3*67*68/2 = 6,834 points ≈ 109 KB.
 //
 //   - Polyline: the 5-value form "startLat,startLon,endLat,endLon,count"
 //     generates `count` points from ~30 characters of input, and segments
@@ -135,15 +135,21 @@ type BboxLocation struct {
 // tighter than raw memory alone would demand.
 const (
 	// MaxRadiusKm is the largest radius, in kilometres, accepted for a
-	// "lat,lon|radiusKm" location. 170 km is far beyond any drone mission
+	// "lat,lon|radiusKm" location. 200 km is far beyond any drone mission
 	// and generous for a regional weather sweep.
-	MaxRadiusKm = 170.0
+	MaxRadiusKm = 200.0
 
 	// MaxExpandedRadiusPoints is the hard ceiling on the number of points a
 	// single radius expansion may produce. It is the belt-and-braces backstop
-	// for MaxRadiusKm — at MaxRadiusKm the closed form yields 4,959 points, so
+	// for MaxRadiusKm — at MaxRadiusKm the closed form yields 6,834 points, so
 	// this bound is never the binding one for a parsed location.
-	MaxExpandedRadiusPoints = 5000
+	//
+	// The two constants have to move together. The expansion loop stops on
+	// this ceiling, so a radius whose closed form exceeds it does not fail —
+	// it quietly returns a partial ring set covering a smaller circle than the
+	// caller asked for, which is worse than a rejection because nobody is
+	// told. Raise this first, then MaxRadiusKm.
+	MaxExpandedRadiusPoints = 7000
 
 	// MaxPolylinePoints is the largest number of points a single polyline
 	// location may parse to. It bounds both the generated 5-value form and
