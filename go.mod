@@ -3,6 +3,7 @@ module atmosoar.io/atmosoar-api-libraries
 go 1.25.13
 
 require (
+	github.com/fogleman/gg v1.3.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/prometheus/client_golang v1.23.2
@@ -13,6 +14,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.27.1
+	golang.org/x/image v0.36.0
 )
 
 require (
@@ -33,6 +35,7 @@ require (
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
+	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

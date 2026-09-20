@@ -1,6 +1,6 @@
 # atmosoar-api-libraries
 
-Shared Go libraries for Atmosoar services. A single Go module containing nine packages that any Atmosoar Go service can import independently.
+Shared Go libraries for Atmosoar services. A single Go module containing ten packages that any Atmosoar Go service can import independently.
 
 ## Packages
 
@@ -15,6 +15,7 @@ Shared Go libraries for Atmosoar services. A single Go module containing nine pa
 | `runtimeconfig` | Typed, bounds-checked runtime-configuration registry and `Manager` backed by a pluggable `Store` (in-memory, or Postgres via the `runtimeconfig/pgxstore` subpackage). Ships an `fx.Module`. Added in v0.4.0. |
 | `admin` | Standard `/admin` REST surface (service info, feature flags, runtime-config get/set) mounted onto a Gin engine via `Register`. Builds on `runtimeconfig` and `claims`. Added in v0.4.0. |
 | `observation` | Common, unit-normalised weather observation model (SI units, field names matching observation-api), unit conversions, Magnus dewpoint and plausibility bounds. Used by services that ingest station payloads. Unreleased (develop). |
+| `chart` | Weather-data visualization: one `Spec` rendered three ways — JSON (for browsers), SVG and PNG — from a single shared draw list. Owns the validated colour palette, the reserved status scale and the per-parameter threshold registry, so every service draws the same weather the same way. Time series, meteograms and wind roses. Unreleased (develop). |
 
 ## Install
 
@@ -35,6 +36,7 @@ import (
     "atmosoar.io/atmosoar-api-libraries/runtimeconfig"
     "atmosoar.io/atmosoar-api-libraries/admin"
     "atmosoar.io/atmosoar-api-libraries/observation"
+    "atmosoar.io/atmosoar-api-libraries/chart"
 )
 ```
 
@@ -55,6 +57,28 @@ func main() {
     ).Run()
 }
 ```
+
+## Quick start — a chart endpoint
+
+Every service serves the same three encodings from one spec, so a chart is the
+same picture whether it is a PNG on a page, an SVG in a doc, or JSON drawn by
+recharts in the browser:
+
+```go
+spec := chart.FromSamples(chart.KindMeteogram, "Innsbruck", samples,
+    []string{"temperature_2m", "wind_speed", "precipitation"})
+spec.Mode = chart.ModeDark          // both modes are selected, not derived
+spec.Source = "Atmosoar MMA · ICON-D2"
+
+format, ok := chart.ParseFormat(c.Query("format"))   // chart_png | chart_svg | chartspec
+if !ok {
+    // ... not a chart request
+}
+data, contentType, err := chart.Encode(spec, format)
+```
+
+Colours, units, threshold bands, tick labels and the missing-data rule (a gap,
+never a zero) come from the package — a service never picks a hex.
 
 ## Development
 
