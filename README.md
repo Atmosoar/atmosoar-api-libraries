@@ -9,13 +9,13 @@ Shared Go libraries for Atmosoar services. A single Go module containing ten pac
 | `location` | Parse location query parameters (point, polyline, rectangle, bbox, polygon, WMO station, country shortcut) into typed values. |
 | `time` | Parse time query parameters (single time, range with resolution, list, named shortcut) into typed values. |
 | `shapefile` | Embedded Natural Earth 1:110m country polygon lookup by name or ISO code. Used internally by `location`, also importable on its own. |
-| `observability` | Bootstraps Zap logger, Prometheus HTTP metrics middleware, and OTel tracing with a single `Init` call. `RedactURL`/`RedactURLWithPath`, `WithPathRedactor` and `StartSpan` (non-HTTP spans) are unreleased (develop). Ships an `fx.Module` for FX-based services and plain constructors for non-FX consumers. |
+| `observability` | Bootstraps Zap logger, Prometheus HTTP metrics middleware, and OTel tracing with a single `Init` call. `RedactURL`/`RedactURLWithPath`, `WithPathRedactor` and `StartSpan` (non-HTTP spans) were added in v0.5.0. Ships an `fx.Module` for FX-based services and plain constructors for non-FX consumers. |
 | `httputils` | Structured error response envelope and typed error-code constants. Used by every Atmosoar HTTP service to emit identical error shapes. |
 | `claims` | Single source of truth for the gateway-trust identity contract: the `X-Atmosoar-User-*` / `X-Atmosoar-Identity-Version` header names the gateway stamps after JWT validation, plus the Gin middleware (`FromHeader`, `RequireAdmin`, `FromContext`) that parses them into a typed `Claims`. Replaced the per-service local `middleware/claims` mirrors. Added in v0.4.0. |
 | `runtimeconfig` | Typed, bounds-checked runtime-configuration registry and `Manager` backed by a pluggable `Store` (in-memory, or Postgres via the `runtimeconfig/pgxstore` subpackage). Ships an `fx.Module`. Added in v0.4.0. |
 | `admin` | Standard `/admin` REST surface (service info, feature flags, runtime-config get/set) mounted onto a Gin engine via `Register`. Builds on `runtimeconfig` and `claims`. Added in v0.4.0. |
-| `observation` | Common, unit-normalised weather observation model (SI units, field names matching observation-api), unit conversions, Magnus dewpoint and plausibility bounds. Used by services that ingest station payloads. Unreleased (develop). |
-| `chart` | Weather-data visualization: one `Spec` rendered three ways — JSON (for browsers), SVG and PNG — from a single shared draw list. Owns the validated colour palette, the reserved status scale and the per-parameter threshold registry, so every service draws the same weather the same way. Time series, meteograms and wind roses. Unreleased (develop). |
+| `observation` | Common, unit-normalised weather observation model (SI units, field names matching observation-api), unit conversions, Magnus dewpoint and plausibility bounds. Used by services that ingest station payloads. Added in v0.5.0. |
+| `chart` | Weather-data visualization: one `Spec` rendered three ways — JSON (for browsers), SVG and PNG — from a single shared draw list. Owns the validated colour palette, the reserved status scale and the per-parameter threshold registry, so every service draws the same weather the same way. Time series, meteograms and wind roses. Added in v0.5.0. |
 
 ## Install
 
@@ -96,6 +96,21 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 ## Versioning
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
+
+### v0.5.0
+
+- New `chart` package: one weather-chart definition rendered as JSON, SVG or PNG,
+  with the validated palette, the reserved status scale and the per-parameter
+  threshold registry the whole platform now draws from.
+- New `observation` package; `observability` gains exported URL redaction, a
+  path redactor and non-HTTP spans.
+- **`location` caps expansion.** `MaxRadiusKm` is 200 and
+  `MaxExpandedRadiusPoints` is 7,000, so `lat,lon|R` with R above 200 km is now
+  rejected with an invalid-location error instead of pre-allocating megabytes.
+  A service that documented a larger radius has to correct that text. The two
+  constants move together: the expansion loop *stops* on the point ceiling
+  rather than failing, so a radius whose closed form exceeds it would silently
+  return a smaller circle than asked for.
 
 ## Provenance
 
