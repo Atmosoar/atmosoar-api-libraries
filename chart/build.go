@@ -104,14 +104,12 @@ func (p *Panel) resolveY() {
 	if !ok {
 		lo, hi = 0, 1
 	}
-	// A threshold band the data does not reach is still worth seeing: it tells
-	// the reader how much headroom there is.
-	for i := range p.Bands {
-		if b := p.Bands[i]; b.From != nil && *b.From >= lo {
-			hi = math.Max(hi, *b.From)
-		}
-	}
-
+	// The domain is the data's. Threshold bands clip to it rather than
+	// stretching it: widening a 0..17 °C trace to 40 °C so an unreached
+	// caution band can be shown spends half the panel on empty air and
+	// flattens the only thing the reader came for. A band the data does not
+	// approach is simply not drawn, which is the honest reading — and a caller
+	// who wants the headroom anyway sets Y.Max.
 	nlo, nhi, step := niceDomain(lo, hi, zero)
 	if p.Y.Min != nil {
 		nlo = *p.Y.Min

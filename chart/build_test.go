@@ -91,10 +91,45 @@ func TestResolvedMaterialisesThresholdBandsOnlyWhenAsked(t *testing.T) {
 	assert.Equal(t, "#fab219", resolved.Panels[0].Bands[0].Color, "bands wear status, not series, colours")
 	assert.Equal(t, "#d03b3b", resolved.Panels[0].Bands[1].Color)
 
-	// A band the data has not reached still shows, so the reader can see the
-	// headroom.
+	// Bands clip to the data's domain rather than stretching it: a 4..6 m/s
+	// trace is not rescaled to 20 m/s so an unreached band can be shown.
 	require.NotNil(t, resolved.Panels[0].Y.Max)
-	assert.GreaterOrEqual(t, *resolved.Panels[0].Y.Max, 20.0)
+	assert.Less(t, *resolved.Panels[0].Y.Max, 20.0)
+}
+
+func TestThresholdBandsClipToTheDomain(t *testing.T) {
+	t.Parallel()
+	// Temperature bands start at 30 °C. A trace that peaks at 17 gets no
+	// shading at all, and keeps its own scale.
+	cool := TimeSeries("t", SeriesOf("temp", "temperature_2m", pointsAt(Float(2), Float(17))))
+	cool.Panels[0].ShowThresholds = true
+
+	resolved, err := cool.Resolved()
+	require.NoError(t, err)
+	require.NotNil(t, resolved.Panels[0].Y.Max)
+	assert.Less(t, *resolved.Panels[0].Y.Max, 30.0, "the trace keeps its own scale")
+
+	d, err := Render(cool)
+	require.NoError(t, err)
+	for _, op := range d.Ops {
+		if op.Kind == OpRect && op.Alpha == thresholdAlpha {
+			t.Fatal("a band the data does not reach must not be drawn")
+		}
+	}
+
+	// A trace that does reach the bands gets them shaded.
+	hot := TimeSeries("t", SeriesOf("temp", "temperature_2m", pointsAt(Float(28), Float(37))))
+	hot.Panels[0].ShowThresholds = true
+	d, err = Render(hot)
+	require.NoError(t, err)
+
+	shaded := 0
+	for _, op := range d.Ops {
+		if op.Kind == OpRect && op.Alpha == thresholdAlpha {
+			shaded++
+		}
+	}
+	assert.Equal(t, 2, shaded, "caution and unfavourable both fall inside this domain")
 }
 
 func TestResolvedSharesOneTimeDomainAcrossPanels(t *testing.T) {
