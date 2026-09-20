@@ -148,7 +148,11 @@ func SeriesOf(name, parameter string, points []Point) Series {
 func TimeSeries(title string, series ...Series) Spec {
 	panel := Panel{Series: series}
 	if len(series) == 1 {
-		panel.Title = ParameterLabel(series[0].Parameter)
+		// The series' own name, not its parameter's label: a series whose
+		// parameter is not in the registry (a unit the registry does not
+		// carry) still has a name, and an untitled panel would show only its
+		// unit.
+		panel.Title = series[0].Name
 	}
 	return Spec{Kind: KindTimeSeries, Title: title, Panels: []Panel{panel}}
 }
@@ -159,11 +163,13 @@ func Meteogram(title string, panels ...Panel) Spec {
 	return Spec{Kind: KindMeteogram, Title: title, Panels: panels}
 }
 
-// PanelOf is one meteogram panel, titled from its first series' parameter.
+// PanelOf is one meteogram panel, titled from its series when it carries just
+// one. A panel of several series is named by the legend instead, and its header
+// states the shared unit.
 func PanelOf(series ...Series) Panel {
 	p := Panel{Series: series}
 	if len(series) == 1 {
-		p.Title = ParameterLabel(series[0].Parameter)
+		p.Title = series[0].Name
 	}
 	return p
 }
