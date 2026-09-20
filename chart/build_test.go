@@ -518,3 +518,28 @@ func TestLongLabelsAreTruncatedNotClipped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(out), "…")
 }
+
+func TestPinnedDomainDrivesTheTickStep(t *testing.T) {
+	t.Parallel()
+	// A symmetric ±20 frame around a series that spans 10: the ticks must
+	// follow the frame, not the data, or the axis fills with noise.
+	spec := TimeSeries("t", SeriesOf("dp", "pressure_difference",
+		pointsAt(Float(-2), Float(8))))
+	spec.Panels[0].Y.Min = Float(-20)
+	spec.Panels[0].Y.Max = Float(20)
+
+	resolved, err := spec.Resolved()
+	require.NoError(t, err)
+
+	ticks := resolved.Panels[0].Y.Ticks
+	require.NotEmpty(t, ticks)
+	assert.LessOrEqual(t, len(ticks), 9, "a ±20 frame needs a handful of ticks, not twenty")
+	assert.InDelta(t, -20.0, ticks[0].Value, 1e-9)
+	assert.InDelta(t, 20.0, ticks[len(ticks)-1].Value, 1e-9)
+
+	// An unpinned panel still steps off its own data.
+	loose := TimeSeries("t", SeriesOf("dp", "pressure_difference", pointsAt(Float(-2), Float(8))))
+	resolved, err = loose.Resolved()
+	require.NoError(t, err)
+	assert.Greater(t, *resolved.Panels[0].Y.Min, -20.0)
+}

@@ -111,6 +111,7 @@ func (p *Panel) resolveY() {
 	// approach is simply not drawn, which is the honest reading — and a caller
 	// who wants the headroom anyway sets Y.Max.
 	nlo, nhi, step := niceDomain(lo, hi, zero)
+	pinned := p.Y.Min != nil || p.Y.Max != nil
 	if p.Y.Min != nil {
 		nlo = *p.Y.Min
 	}
@@ -119,6 +120,13 @@ func (p *Panel) resolveY() {
 	}
 	if nhi <= nlo {
 		nhi = nlo + 1
+	}
+	if pinned {
+		// The step has to follow the domain that is actually drawn. Derived
+		// from the data extent instead, a caller who pins a wide domain — a
+		// symmetric ±20 frame around a series that only spans 10 — gets a tick
+		// every 2 across the whole axis, which is noise.
+		step = niceStep((nhi - nlo) / targetTicks)
 	}
 	p.Y.Min, p.Y.Max = Float(nlo), Float(nhi)
 	p.Y.Zero = zero
