@@ -97,6 +97,12 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
 
+### v0.5.2
+
+- `chart` knows `evapotranspiration` (reference ET0, FAO-56, mm/h, bars from
+  zero) with the aliases `et0` and `et0_fao_evapotranspiration`, and charts
+  `hourly_precipitation` as `precipitation_rate` (mm/h).
+
 ### v0.5.0
 
 - New `chart` package: one weather-chart definition rendered as JSON, SVG or PNG,
