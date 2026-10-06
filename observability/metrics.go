@@ -25,6 +25,14 @@ var HTTPRequestsTotal = prometheus.NewCounterVec(
 	[]string{"method", "path", "status"},
 )
 
+// httpDurationBuckets extends the client default (5 ms .. 10 s) up to the
+// gateway's 200 s upstream timeout. With the default top bucket at 10 s every
+// slower request landed in +Inf, so a 165 s /impact run and a 12 s one looked
+// identical and any p95 above 10 s read as exactly 10 s.
+//
+//nolint:gochecknoglobals // bucket layout shared by the histogram below.
+var httpDurationBuckets = append(append([]float64{}, prometheus.DefBuckets...), 30, 60, 120, 200)
+
 // HTTPRequestDuration records HTTP request latency, labelled by method/path.
 //
 //nolint:gochecknoglobals // parity with MMA-168; these are package-level singletons by design.
@@ -32,7 +40,7 @@ var HTTPRequestDuration = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Histogram of HTTP request latencies.",
-		Buckets: prometheus.DefBuckets,
+		Buckets: httpDurationBuckets,
 	},
 	[]string{"method", "path"},
 )
