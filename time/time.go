@@ -75,19 +75,23 @@ type ListTime struct {
 //
 // Memory math (a time.Time is 24 bytes — wall, ext, loc):
 //
-//   - "start,end,resolution" walks 0..resolution and appends one timestamp
-//     per step, with only a `resolution <= 0` guard. resolution=100000000
-//     grows the slice to ~2.4 GB.
-//   - "start/end/PT1S" steps the span at one second regardless of its
-//     length: 1980→2050 is ~2.2e9 timestamps ≈ 53 GB.
-//   - ExpandTimes does make([]time.Time, 0, res+1) from a JSON-decoded
-//     RangeTime.Resolution that nothing validated; res = 2^60 is not a slow
-//     allocation but an outright makeslice panic.
+//   - "start,end,hours" and "start/end/PT1S" step the span at a caller-chosen
+//     step regardless of its length: 1980→2050 at one second is ~2.2e9
+//     timestamps ≈ 53 GB, hourly still ~613,000.
+//   - ExpandTimes walks a JSON-decoded RangeTime.Resolution that only
+//     decodeTimePayload validated; a hand-built one must still not be able
+//     to ask for an unbounded slice.
 //
 // 10,000 is over a year of hourly steps (8,760) and ~240 KB expanded — far
 // beyond /impact's days=10 (241 hourly slots) yet cheap in both memory and
 // downstream per-timestamp work.
 const MaxTimestamps = 10000
+
+// MaxResolutionHours bounds the hour step of a range ("start,end,hours" and
+// RangeTime.Resolution) at 100 years. That is far below the point where
+// time.Duration(hours)*time.Hour overflows (about 292 years), and any larger
+// value is a typo, not a step.
+const MaxResolutionHours = 24 * 366 * 100
 
 // registryMu guards concurrent access to the package-level shortcut
 // registries (TimeShortcutsMap, TimeRangeShortcutsMap) via the
@@ -228,45 +232,31 @@ func parseTimeRange(rangeStr string) (*TimeRange, error) {
 		}, nil
 	}
 
-	resolution, err := strconv.Atoi(parts[2])
+	hours, err := strconv.Atoi(parts[2])
 	if err != nil {
 		return nil, fmt.Errorf("resolution %s has to be an integer", parts[2])
 	}
-
-	if resolution <= 0 {
+	if hours <= 0 {
 		return nil, fmt.Errorf("resolution must be a positive integer")
 	}
-	// The loop below emits resolution+1 timestamps, so the cap has to be
-	// checked before it runs — not after the slice has already grown.
-	if resolution >= MaxTimestamps {
-		return nil, fmt.Errorf("resolution must be < %d, got %d", MaxTimestamps, resolution)
+	if hours > MaxResolutionHours {
+		return nil, fmt.Errorf("resolution must be <= %d hours, got %d", MaxResolutionHours, hours)
 	}
-
-	// Calculate the time points based on resolution
-	duration := end.Sub(start)
-	if duration <= 0 {
+	if !end.After(start) {
 		return nil, fmt.Errorf("end time must be after start time")
 	}
 
-	step := duration / time.Duration(resolution)
-	timestamps := make([]time.Time, 0, resolution+1)
-
-	current := start
-	for i := 0; i <= resolution; i++ {
-		timestamps = append(timestamps, current)
-		current = current.Add(step)
-
-		// Ensure we don't go beyond the end time due to rounding errors
-		if current.After(end) {
-			current = end
-		}
+	// The third element is the step in whole hours, the same meaning as the
+	// slash form's bare-integer step: "T00:00Z,T12:00Z,3" is 00, 03, 06, 09
+	// and 12. Until ATMO-311 it was read as a number of segments, which the
+	// public docs never said.
+	timestamps, err := stepTimestamps(rangeStr, start, end, time.Duration(hours)*time.Hour)
+	if err != nil {
+		return nil, err
 	}
-
 	return &TimeRange{
-		Type: TimeTypeList,
-		Payload: ListTime{
-			Timestamps: timestamps,
-		},
+		Type:    TimeTypeList,
+		Payload: ListTime{Timestamps: timestamps},
 	}, nil
 }
 
@@ -305,11 +295,38 @@ func parseTimeRangeSlash(rangeStr string) (*TimeRange, error) {
 		return nil, err
 	}
 
-	// The step is caller-supplied and the span is unbounded, so
-	// "1980-01-01/2050-01-01/PT1S" would otherwise walk ~2.2e9 iterations,
-	// appending until the process dies. Size the expansion up front and
-	// reject it here instead.
-	count := int64(end.Sub(start)/step) + 1
+	timestamps, err := stepTimestamps(rangeStr, start, end, step)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TimeRange{
+		Type:    TimeTypeList,
+		Payload: ListTime{Timestamps: timestamps},
+	}, nil
+}
+
+// stepCount is the number of points stepTimestamps emits for span at step:
+// one per step from the start, plus the end boundary when the step does not
+// divide the span.
+func stepCount(span, step time.Duration) int64 {
+	count := int64(span/step) + 1
+	if span%step != 0 {
+		count++
+	}
+	return count
+}
+
+// stepTimestamps walks start..end at step and returns every point, the end
+// boundary always included. The step is caller-supplied and the span is
+// unbounded ("1980-01-01/2050-01-01/PT1S" is ~2.2e9 points), so the
+// expansion is sized up front and refused beyond MaxTimestamps instead of
+// appending until the process dies.
+func stepTimestamps(rangeStr string, start, end time.Time, step time.Duration) ([]time.Time, error) {
+	if step <= 0 {
+		return nil, fmt.Errorf("range step must be positive")
+	}
+	count := stepCount(end.Sub(start), step)
 	if count > MaxTimestamps {
 		return nil, fmt.Errorf(
 			"time range %q expands to %d timestamps, more than the %d maximum; use a coarser step",
@@ -317,7 +334,7 @@ func parseTimeRangeSlash(rangeStr string) (*TimeRange, error) {
 		)
 	}
 
-	timestamps := make([]time.Time, 0, count+1)
+	timestamps := make([]time.Time, 0, count)
 	for t := start; !t.After(end); t = t.Add(step) {
 		timestamps = append(timestamps, t.UTC())
 	}
@@ -325,11 +342,7 @@ func parseTimeRangeSlash(rangeStr string) (*TimeRange, error) {
 	if len(timestamps) == 0 || !timestamps[len(timestamps)-1].Equal(end.UTC()) {
 		timestamps = append(timestamps, end.UTC())
 	}
-
-	return &TimeRange{
-		Type:    TimeTypeList,
-		Payload: ListTime{Timestamps: timestamps},
-	}, nil
+	return timestamps, nil
 }
 
 // parseStepDuration parses a range step expressed either as an ISO-8601
@@ -486,13 +499,22 @@ func decodeTimePayload(t TimeRangeType, raw json.RawMessage) (interface{}, error
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("timeRange: invalid range payload: %w", err)
 		}
-		// The structured payload bypasses parseTimeRange, so ExpandTimes
-		// would be the first code to see Resolution — and its make() with a
-		// caller-chosen capacity panics rather than erroring.
-		if p.Resolution >= MaxTimestamps {
+		// The structured payload bypasses parseTimeRange, so this is the
+		// first code to see Resolution (hours): bound the step and the size
+		// of the expansion here, so ExpandTimes never has to refuse anything.
+		if p.Resolution > MaxResolutionHours {
 			return nil, fmt.Errorf(
-				"timeRange: resolution must be < %d, got %d", MaxTimestamps, p.Resolution,
+				"timeRange: resolution must be <= %d hours, got %d", MaxResolutionHours, p.Resolution,
 			)
+		}
+		if p.Resolution > 0 && p.End.After(p.Start) {
+			step := time.Duration(p.Resolution) * time.Hour
+			if count := stepCount(p.End.Sub(p.Start), step); count > MaxTimestamps {
+				return nil, fmt.Errorf(
+					"timeRange: range expands to %d timestamps, more than the %d maximum; use a coarser resolution",
+					count, MaxTimestamps,
+				)
+			}
 		}
 		return p, nil
 	case TimeTypeList:
@@ -587,7 +609,9 @@ func ExpandTimes(tr TimeRange) []time.Time {
 	return nil
 }
 
-// expandRangeTime turns a RangeTime into its inclusive list of timestamps.
+// expandRangeTime turns a RangeTime into its inclusive list of timestamps:
+// start and end only when Resolution is 0, otherwise one point every
+// Resolution hours from the start, with the end boundary always included.
 // Split out of ExpandTimes so the range arm stays flat and readable.
 func expandRangeTime(rt RangeTime) []time.Time {
 	start, end, res := rt.Start, rt.End, rt.Resolution
@@ -595,28 +619,29 @@ func expandRangeTime(rt RangeTime) []time.Time {
 		// Non-positive span → return start only
 		return []time.Time{start}
 	}
-	// If res is the number of segments, we return res+1 points (inclusive).
 	if res <= 0 {
 		return []time.Time{start, end}
 	}
-	// Defence in depth: decodeTimePayload rejects an oversized Resolution at
-	// parse time, but this function has no error return and a hand-built
-	// RangeTime must not be able to ask make() for 2^60 elements — that is a
-	// hard runtime panic, not an error. Clamping yields a coarser expansion,
-	// which beats crashing.
-	if res >= MaxTimestamps {
-		res = MaxTimestamps - 1
+	// Defence in depth: decodeTimePayload bounds Resolution and the expansion
+	// at parse time, but this function has no error return and a hand-built
+	// RangeTime must neither overflow the step arithmetic nor walk an
+	// unbounded span. Clamp the hours, then coarsen the step until the list
+	// fits MaxTimestamps; a coarser expansion beats crashing.
+	if res > MaxResolutionHours {
+		res = MaxResolutionHours
 	}
-	step := end.Sub(start) / time.Duration(res)
-	out := make([]time.Time, 0, res+1)
-	cur := start
-	for i := 0; i <= res; i++ {
-		if i == res {
-			out = append(out, end.UTC())
-		} else {
-			out = append(out, cur.UTC())
-			cur = cur.Add(step)
-		}
+	span := end.Sub(start)
+	step := time.Duration(res) * time.Hour
+	if stepCount(span, step) > MaxTimestamps {
+		// The smallest whole-hour step that fits: MaxTimestamps-2 full steps
+		// leave room for the start and an unaligned end boundary.
+		step = span / time.Duration(MaxTimestamps-2)
+		step = ((step + time.Hour - 1) / time.Hour) * time.Hour
+	}
+	out, err := stepTimestamps("", start, end, step)
+	if err != nil {
+		// Unreachable after the coarsening above; never return nothing.
+		return []time.Time{start.UTC(), end.UTC()}
 	}
 	return out
 }
@@ -681,8 +706,9 @@ func BuildTimeShortcuts(shortcuts map[string]TimeShortcut) map[string]func() tim
 }
 
 // BuildRangeTimeShortcuts creates the dynamic timeRangeShortcutsMap from range_offset entries.
-// Each returned func computes: Start = UTC midnight of current day, End = Start + hours.
-// Entries with hours <= 0 are logged as warnings and skipped.
+// Each returned func computes: Start = UTC midnight of current day, End = Start + hours,
+// at hourly resolution, so "3day" expands to 73 points rather than its two
+// boundaries (ATMO-311). Entries with hours <= 0 are logged as warnings and skipped.
 func BuildRangeTimeShortcuts(shortcuts map[string]TimeShortcut, log *zap.SugaredLogger) map[string]func() RangeTime {
 	m := make(map[string]func() RangeTime)
 	for name, sc := range shortcuts {
@@ -708,7 +734,7 @@ func BuildRangeTimeShortcuts(shortcuts map[string]TimeShortcut, log *zap.Sugared
 			return RangeTime{
 				Start:      FormatTimeDataToRFC3339(start),
 				End:        FormatTimeDataToRFC3339(end),
-				Resolution: 0,
+				Resolution: 1,
 			}
 		}
 	}

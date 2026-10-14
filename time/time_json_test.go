@@ -148,24 +148,50 @@ func TestTimeRangeUnmarshalJSON(t *testing.T) {
 
 // --- expansion caps (DoS) ---
 
-// TestParseTime_ResolutionCap verifies the "start,end,resolution" grammar
-// rejects an oversized resolution at PARSE time. The loop that follows emits
-// resolution+1 timestamps with only a `<= 0` guard, so resolution=100000000
-// used to grow the slice to ~2.4 GB.
-func TestParseTime_ResolutionCap(t *testing.T) {
+// TestParseTime_ResolutionHours pins the "start,end,hours" grammar: the third
+// element is a step in whole hours, as the public docs have always said
+// (ATMO-311), not a number of segments.
+func TestParseTime_ResolutionHours(t *testing.T) {
 	const span = "2025-01-01T00:00:00Z,2025-01-02T00:00:00Z,"
 
-	res, err := ParseTime(span + strconv.Itoa(MaxTimestamps-1))
+	// Hourly over one day is 25 points.
+	res, err := ParseTime(span + "1")
 	require.NoError(t, err)
 	list, ok := res.Payload.(ListTime)
 	require.True(t, ok)
-	assert.Len(t, list.Timestamps, MaxTimestamps)
+	assert.Len(t, list.Timestamps, 25)
+	assert.Equal(t, time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC), list.Timestamps[1])
 
-	_, err = ParseTime(span + strconv.Itoa(MaxTimestamps))
+	// The documented example: 00 to 12 every 3 hours is 00, 03, 06, 09, 12.
+	res, err = ParseTime("2025-07-23T00:00:00Z,2025-07-23T12:00:00Z,3")
+	require.NoError(t, err)
+	list, ok = res.Payload.(ListTime)
+	require.True(t, ok)
+	assert.Len(t, list.Timestamps, 5)
+	assert.Equal(t, time.Date(2025, 7, 23, 9, 0, 0, 0, time.UTC), list.Timestamps[3])
+
+	// A step coarser than the span yields the two boundaries.
+	res, err = ParseTime(span + "48")
+	require.NoError(t, err)
+	list, ok = res.Payload.(ListTime)
+	require.True(t, ok)
+	assert.Len(t, list.Timestamps, 2)
+}
+
+// TestParseTime_ResolutionCap verifies the "start,end,hours" grammar rejects
+// an oversized expansion at PARSE time: hourly over 70 years is ~613,000
+// timestamps, and a step beyond MaxResolutionHours would overflow the
+// Duration arithmetic before it ever reached the loop.
+func TestParseTime_ResolutionCap(t *testing.T) {
+	_, err := ParseTime("1980-01-01T00:00:00Z,2050-01-01T00:00:00Z,1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum")
+
+	_, err = ParseTime("2025-01-01T00:00:00Z,2025-01-02T00:00:00Z," + strconv.Itoa(MaxResolutionHours+1))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resolution")
 
-	_, err = ParseTime(span + "100000000")
+	_, err = ParseTime("2025-01-01T00:00:00Z,2025-01-02T00:00:00Z,100000000")
 	require.Error(t, err)
 }
 
@@ -185,8 +211,9 @@ func TestParseTime_SlashStepCap(t *testing.T) {
 }
 
 // TestUnmarshalTimeRange_ResolutionCap covers the structured JSON payload
-// path, which bypasses parseTimeRange: ExpandTimes would otherwise be the
-// first code to see Resolution, and its make() panics rather than erroring.
+// path, which bypasses parseTimeRange: decodeTimePayload is the first code to
+// see Resolution (hours) and must refuse both a step that would overflow the
+// Duration arithmetic and a step that expands the span beyond MaxTimestamps.
 func TestUnmarshalTimeRange_ResolutionCap(t *testing.T) {
 	var tr TimeRange
 	err := json.Unmarshal([]byte(`{"type":"range","payload":{
@@ -194,12 +221,26 @@ func TestUnmarshalTimeRange_ResolutionCap(t *testing.T) {
 		"resolution":1152921504606846976}}`), &tr)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resolution")
+
+	err = json.Unmarshal([]byte(`{"type":"range","payload":{
+		"start":"1980-01-01T00:00:00Z","end":"2050-01-01T00:00:00Z",
+		"resolution":1}}`), &tr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum")
+
+	// A sane payload still decodes and expands as hours.
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"range","payload":{
+		"start":"2025-01-01T00:00:00Z","end":"2025-01-02T00:00:00Z",
+		"resolution":6}}`), &tr))
+	assert.Len(t, ExpandTimes(tr), 5)
 }
 
 // TestExpandTimes_ResolutionClamped is the defence-in-depth check: a TimeRange
-// built by hand (not decoded) must still not reach make([]time.Time, 0, 2^60).
+// built by hand (not decoded) must neither overflow the step arithmetic nor
+// walk an unbounded span; it coarsens instead of crashing.
 func TestExpandTimes_ResolutionClamped(t *testing.T) {
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	out := ExpandTimes(TimeRange{
 		Type: TimeTypeRange,
 		Payload: RangeTime{
@@ -208,7 +249,20 @@ func TestExpandTimes_ResolutionClamped(t *testing.T) {
 			Resolution: 1 << 60,
 		},
 	})
-	assert.Len(t, out, MaxTimestamps)
+	assert.Equal(t, []time.Time{start, start.Add(24 * time.Hour)}, out)
+
+	out = ExpandTimes(TimeRange{
+		Type: TimeTypeRange,
+		Payload: RangeTime{
+			Start:      start,
+			End:        start.AddDate(70, 0, 0),
+			Resolution: 1,
+		},
+	})
+	assert.LessOrEqual(t, len(out), MaxTimestamps)
+	assert.Greater(t, len(out), MaxTimestamps/2)
+	assert.True(t, out[0].Equal(start))
+	assert.True(t, out[len(out)-1].Equal(start.AddDate(70, 0, 0)))
 }
 
 // TestParseTimeList_Cap verifies the pipe-delimited list honours the same
