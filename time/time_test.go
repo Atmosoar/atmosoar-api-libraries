@@ -77,13 +77,14 @@ func TestTimeParsing(t *testing.T) {
 			},
 		},
 		{
-			name:  "time range with resolution",
-			input: "2023-01-01T00:00:00Z,2023-01-02T00:00:00Z,1",
+			name:  "time range with resolution in hours",
+			input: "2023-01-01T00:00:00Z,2023-01-02T00:00:00Z,12",
 			expected: &TimeRange{
 				Type: TimeTypeList,
 				Payload: ListTime{
 					Timestamps: []time.Time{
 						time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+						time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC),
 						time.Date(2023, 1, 2, 0, 0, 0, 0, time.UTC),
 					},
 				},
@@ -227,8 +228,21 @@ func TestExpandTimes(t *testing.T) {
 			Payload: RangeTime{Start: start, End: end, Resolution: 3},
 		}
 		times := ExpandTimes(tr)
-		assert.Len(t, times, 4) // 3+1 inclusive
+		assert.Len(t, times, 3) // every 3 hours: 00, 03, 06
 		assert.True(t, times[0].Equal(start))
+		assert.True(t, times[1].Equal(start.Add(3*time.Hour)))
+		assert.True(t, times[2].Equal(end))
+	})
+
+	t.Run("range resolution keeps an unaligned end", func(t *testing.T) {
+		start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+		end := time.Date(2025, 1, 1, 7, 0, 0, 0, time.UTC)
+		tr := TimeRange{
+			Type:    TimeTypeRange,
+			Payload: RangeTime{Start: start, End: end, Resolution: 3},
+		}
+		times := ExpandTimes(tr)
+		assert.Len(t, times, 4) // 00, 03, 06 and the 07 boundary
 		assert.True(t, times[3].Equal(end))
 	})
 
@@ -262,7 +276,7 @@ func TestExpandTimes(t *testing.T) {
 			Payload: &RangeTime{Start: start, End: end, Resolution: 2},
 		}
 		times := ExpandTimes(tr)
-		assert.Len(t, times, 3) // 2+1 inclusive
+		assert.Len(t, times, 4) // every 2 hours: 00, 02, 04, 06
 	})
 
 	t.Run("range with ListTime payload", func(t *testing.T) {
@@ -376,7 +390,8 @@ func TestBuildRangeTimeShortcuts(t *testing.T) {
 		expectedEnd := expectedStart.Add(72 * time.Hour)
 		assert.True(t, rt.Start.Equal(expectedStart))
 		assert.True(t, rt.End.Equal(expectedEnd))
-		assert.Equal(t, 0, rt.Resolution)
+		assert.Equal(t, 1, rt.Resolution, "range shortcuts expand hourly")
+		assert.Len(t, ExpandTimes(TimeRange{Type: TimeTypeRange, Payload: rt}), 73)
 	})
 
 	t.Run("7day returns correct range", func(t *testing.T) {
@@ -410,7 +425,8 @@ func TestParseTime_RangeShortcuts(t *testing.T) {
 		expectedEnd := expectedStart.Add(72 * time.Hour)
 		assert.True(t, rt.Start.Equal(expectedStart))
 		assert.True(t, rt.End.Equal(expectedEnd))
-		assert.Equal(t, 0, rt.Resolution)
+		assert.Equal(t, 1, rt.Resolution, "range shortcuts expand hourly")
+		assert.Len(t, ExpandTimes(TimeRange{Type: TimeTypeRange, Payload: rt}), 73)
 	})
 
 	t.Run("10day shortcut returns range", func(t *testing.T) {
