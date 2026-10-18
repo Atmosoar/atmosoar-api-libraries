@@ -267,9 +267,9 @@ func TestConcurrentApplyKeepsEveryKey(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	for _, v := range m.MergedView() {
-		if v.Source != "override" {
-			t.Fatalf("%s lost its concurrent override (source=%s)", v.Key, v.Source)
+	for i := 0; i < n; i++ {
+		if key := fmt.Sprintf("k%03d", i); m.Int(key) != 7 {
+			t.Fatalf("%s lost its concurrent override", key)
 		}
 	}
 }

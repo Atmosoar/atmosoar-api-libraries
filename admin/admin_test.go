@@ -272,3 +272,87 @@ func TestConcurrentFlagSetKeepsEveryFlag(t *testing.T) {
 		}
 	}
 }
+
+// downStore fails every operation.
+type downStore struct{}
+
+func (downStore) LoadAll(context.Context) (map[string]json.RawMessage, error) {
+	return nil, errors.New("down")
+}
+func (downStore) Upsert(context.Context, string, json.RawMessage) error { return errors.New("down") }
+func (downStore) Delete(context.Context, string) error                  { return errors.New("down") }
+func (downStore) Kind() string                                          { return "down" }
+
+func TestFlagSetLoadAtBoot(t *testing.T) {
+	ctx := context.Background()
+	known := []Flag{{Name: "a", Default: false}, {Name: "b", Default: true}, {Name: "c", Default: true}}
+
+	store := runtimeconfig.NewMemStore()
+	_ = store.Upsert(ctx, "a", json.RawMessage(`true`))
+	_ = store.Upsert(ctx, "b", json.RawMessage(`"off"`)) // invalid: keeps default
+	_ = store.Upsert(ctx, "zz", json.RawMessage(`true`)) // undeclared: ignored
+	fs := NewFlagSet(store, zap.NewNop().Sugar(), known)
+	if err := fs.LoadAtBoot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Enabled("a") || !fs.Enabled("b") || !fs.Enabled("c") || fs.Enabled("zz") {
+		t.Fatalf("unexpected snapshot: %+v", fs.Snapshot())
+	}
+
+	down := NewFlagSet(downStore{}, zap.NewNop().Sugar(), known)
+	if err := down.LoadAtBoot(ctx); err != nil {
+		t.Fatalf("a store error at boot must not fail startup: %v", err)
+	}
+	if down.Enabled("a") || !down.Enabled("b") {
+		t.Fatal("store error must leave the declared defaults")
+	}
+	if err := down.Set(ctx, "a", true); err == nil || down.Enabled("a") {
+		t.Fatal("a failed persist must not flip the live flag")
+	}
+}
+
+func TestDeleteConfigAndFlagErrors(t *testing.T) {
+	r := setupEngine(t, nil)
+	if w := do(r, http.MethodDelete, "/admin/test/config/nope", "", true); w.Code != http.StatusNotFound {
+		t.Fatalf("delete unknown: want 404 got %d", w.Code)
+	}
+	if w := do(r, http.MethodDelete, "/admin/test/config/dem_mode", "", true); w.Code != http.StatusConflict {
+		t.Fatalf("delete immutable: want 409 got %d", w.Code)
+	}
+
+	t.Setenv(claims.EnvTrustHeaders, "true")
+	reg := runtimeconfig.NewRegistry().
+		Register(runtimeconfig.Key{Name: "max_results", Kind: runtimeconfig.KindInt, Default: 1, Mutable: true})
+	fs := NewFlagSet(downStore{}, zap.NewNop().Sugar(), []Flag{{Name: "kill", Description: "d"}})
+	broken := gin.New()
+	Register(broken, Config{
+		Prefix:   "/admin/test",
+		Service:  "test",
+		Manager:  runtimeconfig.NewManager(reg, downStore{}, zap.NewNop().Sugar()),
+		Flags:    fs,
+		Logger:   zap.NewNop().Sugar(),
+		BootTime: time.Now(),
+	})
+	if w := do(
+		broken,
+		http.MethodDelete,
+		"/admin/test/config/max_results",
+		"",
+		true,
+	); w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete on a down store: want 500 got %d", w.Code)
+	}
+	if w := do(
+		broken,
+		http.MethodPost,
+		"/admin/test/flags/kill",
+		`{"value":true}`,
+		true,
+	); w.Code != http.StatusInternalServerError {
+		t.Fatalf("toggle on a down store: want 500 got %d", w.Code)
+	}
+	w := do(broken, http.MethodGet, "/admin/test/flags", "", true)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"kill"`) {
+		t.Fatalf("get flags: %d %s", w.Code, w.Body.String())
+	}
+}
