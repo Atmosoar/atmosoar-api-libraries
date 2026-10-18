@@ -9,7 +9,7 @@ Shared Go libraries for Atmosoar services. A single Go module containing ten pac
 | `location` | Parse location query parameters (point, polyline, rectangle, bbox, polygon, WMO station, country shortcut) into typed values. |
 | `time` | Parse time query parameters (single time, range with resolution, list, named shortcut) into typed values. |
 | `shapefile` | Embedded Natural Earth 1:110m country polygon lookup by name or ISO code. Used internally by `location`, also importable on its own. |
-| `observability` | Bootstraps Zap logger, Prometheus HTTP metrics middleware, and OTel tracing with a single `Init` call. `RedactURL`/`RedactURLWithPath`, `WithPathRedactor` and `StartSpan` (non-HTTP spans) were added in v0.5.0. Ships an `fx.Module` for FX-based services and plain constructors for non-FX consumers. |
+| `observability` | Zap logger, Prometheus HTTP metrics middleware and OTel tracing. FX services import `observability.Module`; non-FX consumers call `ConfigFromEnv`, `NewLogger`, `InitTracing`, `RegisterDefaultCollectors`, `HTTPMetricsMiddleware`, `TracingMiddleware` and `MetricsHandler` directly. `RedactURL`/`RedactURLWithPath`, `WithPathRedactor` and `StartSpan` (non-HTTP spans) were added in v0.5.0. |
 | `httputils` | Structured error response envelope and typed error-code constants. Used by every Atmosoar HTTP service to emit identical error shapes. |
 | `claims` | Single source of truth for the gateway-trust identity contract: the `X-Atmosoar-User-*` / `X-Atmosoar-Identity-Version` header names the gateway stamps after JWT validation, plus the Gin middleware (`FromHeader`, `RequireAdmin`, `FromContext`) that parses them into a typed `Claims`. Replaced the per-service local `middleware/claims` mirrors. Added in v0.4.0. |
 | `runtimeconfig` | Typed, bounds-checked runtime-configuration registry and `Manager` backed by a pluggable `Store` (in-memory, or Postgres via the `runtimeconfig/pgxstore` subpackage). Ships an `fx.Module`. Added in v0.4.0. |
@@ -84,9 +84,26 @@ never a zero) come from the package — a service never picks a hex.
 
 ```bash
 go build ./...
-go test ./...
-golangci-lint run
+go test -race -covermode=atomic -coverprofile=coverage.out ./...
+bash .github/workflows/scripts/print_coverage.sh   # fails below MIN_COVERAGE (default 80%)
+golangci-lint run ./...                            # v2.15 or newer (built with Go 1.27)
+govulncheck ./...
+go generate ./shapefile/                           # after replacing the Natural Earth GeoJSON
 ```
+
+CI (`build-pipeline.yml`, `golangci-lint.yml`) runs on a push to any branch and
+on PRs into `master` or `develop`. Total coverage below 80% fails the build.
+On `master`/`main` any govulncheck or osv-scanner finding fails the build. On
+other branches a high or critical osv-scanner finding (CVSS >= 7) fails and the
+rest is reported as a note. An osv-scanner run that errors or produces an
+unreadable report fails on every branch. Accepted advisories live in
+`osv-scanner.toml`, each with an `ignoreUntil` date.
+
+The embedded `shapefile/ne_110m_admin_0_countries.geojson` is generated: it keeps
+only the `NAME` and ISO code properties the lookup reads. Do not edit it by hand;
+pass a fresh upstream file to the generator from the `shapefile/` directory
+(`go run ./internal/gen -in <download>.geojson`) and commit the result. A test
+fails if the embedded file is not in generated form.
 
 **Go version policy:** the `go` directive in `go.mod` is the single source of
 truth for the Go version; CI derives from it via `actions/setup-go` with
@@ -149,6 +166,44 @@ This repo publishes semantic Go module versions. Consumers pin to tagged version
 - **`location.ExpandBboxToGrid` is deprecated.** Consumers that lint with
   staticcheck (SA1019) will see a warning until they move to
   `BboxGridDims` / `ExpandBboxToGridChecked`.
+- **Polygon sampling is bounded.** Grid sampling of a structured polygon
+  payload also fits an edge-test budget (16M point-in-ring tests per pass), so
+  a 5,000-vertex self-intersecting payload costs milliseconds instead of about
+  300 ms of CPU. Embedded countries keep the full grid.
+- **`runtimeconfig.Manager` and `admin.FlagSet` serialise writes.** Two
+  concurrent `Apply`/`Clear`/`Set` calls on different keys used to lose one
+  change from the live overlay while the store kept both rows. Reads stay
+  lock-free.
+- **`shapefile` binary size.** The embedded GeoJSON keeps only `NAME` and the
+  ISO code properties (839 KB -> 263 KB per consumer binary). Lookups and
+  geometry are unchanged.
+
+### v0.6.0
+
+- **Behaviour change (ATMO-311): `time` reads the range resolution as hours.**
+  In `start,end,N` the third element used to split the span into N segments; it
+  is now an N-hour step, the same meaning as the slash form `start/end/PT<N>H`,
+  with the end boundary always included. `2024-01-01T00:00:00Z,2024-01-01T12:00:00Z,3`
+  now yields 5 points (00/03/06/09/12) instead of 4. The structured JSON
+  `resolution` follows the same rule.
+- **Range shortcuts expand hourly.** `BuildRangeTimeShortcuts` builds ranges with
+  `Resolution: 1`, so a `range_offset` shortcut such as `3day` expands to 73
+  hourly timestamps instead of its two boundaries. A consumer that moves its pin
+  from an earlier tag fans out more upstream requests per shortcut and must
+  check its own limits.
+- **Caps move to the expansion.** More than `MaxTimestamps` (10,000) expanded
+  points is a parse error; a step above `MaxResolutionHours` (100 years) is
+  rejected before the duration arithmetic can overflow; `ExpandTimes` coarsens a
+  hand-built range instead of panicking.
+
+### v0.5.3
+
+- **`observability` latency buckets reach 200 s.** `http_request_duration_seconds`
+  keeps the Prometheus default buckets and adds 30, 60, 120 and 200 s (the
+  gateway's upstream timeout). Dashboards and alerts see new `le` labels;
+  requests slower than 10 s no longer all land in `+Inf`.
+- `go.opentelemetry.io/otel` 1.45.0 (and the matching sdk/trace/otlptracegrpc)
+  for GO-2026-6505.
 
 ### v0.5.2
 
