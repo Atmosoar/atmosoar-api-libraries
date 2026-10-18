@@ -1,9 +1,12 @@
 name: golangci-lint
 on:
+  # Feature work merges into develop through PRs, so CI has to run there too,
+  # not only when develop is promoted to master. enforce_policy.sh keeps the
+  # hard vulnerability gate for master and a soft note on other branches.
   push:
-    branches: [ "master", "main" ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: [ "master", "develop" ]
 
 permissions:
   contents: read
