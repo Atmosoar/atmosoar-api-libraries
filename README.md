@@ -127,6 +127,28 @@ This repo publishes semantic Go module versions. Consumers pin to tagged version
   gateway need both variables. `FromHeader` and `RequireAdmin` log a WARN at
   startup naming the env var that disabled enforcement. The legacy per-service
   trust variables are deprecated; move manifests to the canonical name.
+- **Behaviour change: `admin` HTTP contract.** `POST /admin/<svc>/flags/:flag`
+  now answers 400 `INVALID_REQUEST` when the body has no boolean `value`
+  (`{}` used to switch the flag off with a 200). `PUT /admin/<svc>/config/:key`
+  answers 500 `INTERNAL_ERROR` when the store write fails (it was a 400
+  `INVALID_VALUE` echoing the database error); validation failures stay 400
+  and no longer echo the submitted value for `Secret` keys. Validation errors
+  from `runtimeconfig.Manager.Apply` wrap the new `runtimeconfig.ErrInvalidValue`.
+- **`runtimeconfig/pgxstore` can target another table.** `NewWithTable`,
+  `CreateTableSQLFor` and `EnsureSchemaFor` give an `admin.FlagSet` its own
+  table (e.g. `feature_flags`); `New` keeps `runtime_config`. A service that
+  wires both FlagSet and Manager over `pgxstore.New` should move the flags.
+- **`observability` middlewares survive handler panics.** With `gin.Recovery`
+  registered outside them, `HTTPMetricsMiddleware` and `TracingMiddleware` now
+  release the in-flight gauge, count the request as a 500 and end the span
+  (status Error) before re-panicking. `NewLogger` returns the zap build error
+  instead of panicking.
+- **Go 1.27.2 required.** The `go` directive moved from 1.25.13 to 1.27.2, so
+  consumers need a Go 1.27.2 toolchain and a golangci-lint release built with
+  Go 1.27 (CI here uses v2.15) to build and lint against this version.
+- **`location.ExpandBboxToGrid` is deprecated.** Consumers that lint with
+  staticcheck (SA1019) will see a warning until they move to
+  `BboxGridDims` / `ExpandBboxToGridChecked`.
 
 ### v0.5.2
 
