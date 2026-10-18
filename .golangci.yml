@@ -58,7 +58,7 @@ linters:
     exhaustive:
       check:
         - switch
-        - map
+        - mapliteral
     gocritic:
       settings:
         captLocal:
@@ -84,3 +84,8 @@ linters:
           - goconst
           - gosec
           - noctx
+      # Parameter registry and palette tables repeat each key as map key, Key
+      # field and alias target by design; goconst (v2.15+) counts those.
+      - path: 'chart/(parameters|palette)\.go'
+        linters:
+          - goconst
