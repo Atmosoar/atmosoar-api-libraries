@@ -1,0 +1,7 @@
+# GO-2026-5932 flags golang.org/x/crypto/openpgp as unmaintained. It has no
+# fixed version, and nothing in this module imports openpgp (x/crypto comes in
+# only through indirect dependencies). Re-check when the date passes.
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-04-18
+reason = "x/crypto/openpgp is not imported by this module; advisory has no fixed version"

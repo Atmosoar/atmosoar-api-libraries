@@ -10,3 +10,10 @@ RESET="\033[0m"
 echo -e "${BLUE}=== Overall project coverage ===${RESET}"
 total_cov=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
 echo -e "Total coverage: ${GREEN}${total_cov}${RESET}"
+
+# Enforce the CLAUDE.md quality gate (minimum 80% total coverage).
+min_cov="${MIN_COVERAGE:-80}"
+if awk -v t="${total_cov%\%}" -v m="$min_cov" 'BEGIN { exit !(t < m) }'; then
+	echo "Total coverage ${total_cov} is below the ${min_cov}% minimum" >&2
+	exit 1
+fi

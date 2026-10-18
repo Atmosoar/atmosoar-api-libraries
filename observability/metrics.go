@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -118,22 +119,37 @@ func HTTPMetricsMiddleware(skipPath string) gin.HandlerFunc {
 		HTTPRequestsInFlight.Inc()
 		start := time.Now()
 
+		// Record in a defer so a panicking handler still decrements the gauge
+		// and counts its 500. Without it an outer gin.Recovery skipped the
+		// post-Next code and http_requests_in_flight drifted up for good.
+		defer func() {
+			rec := recover()
+			HTTPRequestsInFlight.Dec()
+			elapsed := time.Since(start).Seconds()
+
+			// Use Gin route template for low-cardinality labels; fall back to
+			// /unknown for requests that didn't match any registered route.
+			path := c.FullPath()
+			if path == "" {
+				path = "/unknown"
+			}
+
+			code := c.Writer.Status()
+			if rec != nil {
+				// The recovery middleware answers 500 once the panic reaches it.
+				code = http.StatusInternalServerError
+			}
+			method := c.Request.Method
+			status := strconv.Itoa(code)
+
+			HTTPRequestsTotal.WithLabelValues(method, path, status).Inc()
+			HTTPRequestDuration.WithLabelValues(method, path).Observe(elapsed)
+
+			if rec != nil {
+				panic(rec)
+			}
+		}()
+
 		c.Next()
-
-		HTTPRequestsInFlight.Dec()
-		elapsed := time.Since(start).Seconds()
-
-		// Use Gin route template for low-cardinality labels; fall back to
-		// /unknown for requests that didn't match any registered route.
-		path := c.FullPath()
-		if path == "" {
-			path = "/unknown"
-		}
-
-		method := c.Request.Method
-		status := strconv.Itoa(c.Writer.Status())
-
-		HTTPRequestsTotal.WithLabelValues(method, path, status).Inc()
-		HTTPRequestDuration.WithLabelValues(method, path).Observe(elapsed)
 	}
 }

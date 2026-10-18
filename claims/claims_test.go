@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // Package-level setup for a test binary belongs in TestMain; an init() in a
@@ -115,13 +116,61 @@ func TestRequireAdmin(t *testing.T) {
 		}
 	})
 
-	t.Run("trust disabled -> pass-through", func(t *testing.T) {
+	t.Run("trust disabled alone -> still 403", func(t *testing.T) {
 		t.Setenv(EnvTrustHeaders, "false")
+		w := runChain(t, nil, RequireAdmin(testLogger()))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("want 403 without the insecure-admin opt-in, got %d", w.Code)
+		}
+	})
+
+	t.Run("insecure-admin opt-in alone -> still 403", func(t *testing.T) {
+		t.Setenv(EnvInsecureAdmin, "true")
+		w := runChain(t, nil, RequireAdmin(testLogger()))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("want 403 while trust is on, got %d", w.Code)
+		}
+	})
+
+	t.Run("trust disabled + insecure-admin opt-in -> pass-through", func(t *testing.T) {
+		t.Setenv(EnvTrustHeaders, "false")
+		t.Setenv(EnvInsecureAdmin, "true")
 		w := runChain(t, nil, RequireAdmin(testLogger()))
 		if w.Code != http.StatusOK {
 			t.Fatalf("want 200 pass-through, got %d", w.Code)
 		}
 	})
+}
+
+// A legacy per-service var left at "false" must not open admin routes either.
+func TestRequireAdminLegacyTrustVarAlone(t *testing.T) {
+	if _, ok := os.LookupEnv(EnvTrustHeaders); ok {
+		t.Skip(EnvTrustHeaders + " is set in the environment; the legacy var would not decide")
+	}
+	t.Setenv("MMA_TRUST_GATEWAY_HEADERS", "false")
+	w := runChain(t, nil, RequireAdmin(testLogger()))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d", w.Code)
+	}
+}
+
+func TestTrustDisabledLogsWarning(t *testing.T) {
+	t.Setenv(EnvTrustHeaders, "false")
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core).Sugar()
+
+	FromHeader(logger)
+	RequireAdmin(logger)
+
+	entries := logs.All()
+	if len(entries) != 2 {
+		t.Fatalf("want one WARN per middleware, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if got := e.ContextMap()["env"]; got != EnvTrustHeaders {
+			t.Fatalf("WARN %q should name %s, got %v", e.Message, EnvTrustHeaders, got)
+		}
+	}
 }
 
 func TestTrustEnabledPrecedence(t *testing.T) {

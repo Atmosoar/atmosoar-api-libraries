@@ -3,7 +3,9 @@ package runtimeconfig
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +14,11 @@ import (
 
 // ErrImmutable is returned by Apply/Clear for a key whose Mutable flag is false.
 var ErrImmutable = fmt.Errorf("config key is not mutable")
+
+// ErrInvalidValue wraps every validation failure from Apply (wrong type, out
+// of bounds, not in the enum). Errors that do not wrap it are store or
+// internal failures, which the admin API reports as 500, not 400.
+var ErrInvalidValue = errors.New("invalid config value")
 
 // ErrUnknownKey is returned for a name not present in the registry.
 var ErrUnknownKey = fmt.Errorf("unknown config key")
@@ -24,6 +31,10 @@ type Manager struct {
 	store  Store
 	logger *zap.SugaredLogger
 	state  atomic.Pointer[Overlay]
+	// writeMu serialises the persist-then-publish sequence of LoadAtBoot,
+	// Apply and Clear. Without it two writers clone the same snapshot and the
+	// second Store drops the first one's key from the live overlay.
+	writeMu sync.Mutex
 }
 
 // NewManager builds a Manager and publishes an empty overlay so getters are safe
@@ -41,6 +52,8 @@ func NewManager(reg *Registry, store Store, logger *zap.SugaredLogger) *Manager 
 // service boots on registry defaults (matching the ingestor's behavior when the
 // DB is unreachable at startup).
 func (m *Manager) LoadAtBoot(ctx context.Context) error {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	stored, err := m.store.LoadAll(ctx)
 	if err != nil {
 		m.logger.Warnw("runtimeconfig: load at boot failed; using defaults",
@@ -78,6 +91,8 @@ func (m *Manager) Apply(ctx context.Context, name string, raw json.RawMessage) e
 	if err != nil {
 		return err
 	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	if err := m.store.Upsert(ctx, name, raw); err != nil {
 		return fmt.Errorf("persist %s: %w", name, err)
 	}
@@ -103,6 +118,8 @@ func (m *Manager) Clear(ctx context.Context, name string) error {
 	if !k.Mutable {
 		return ErrImmutable
 	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	if err := m.store.Delete(ctx, name); err != nil {
 		return fmt.Errorf("delete %s: %w", name, err)
 	}

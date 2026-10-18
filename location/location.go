@@ -156,6 +156,20 @@ const (
 	// the total across '|'-chained segments.
 	MaxPolylinePoints = 2000
 
+	// MaxPolygonVertices bounds the total vertex count of a structured polygon
+	// payload. The largest embedded Natural Earth country (Canada) has 794.
+	MaxPolygonVertices = 5000
+
+	// MaxPointsPerDegree is the largest bbox grid density accepted from a
+	// request. The bbox grid grows with its square: the whole globe at 100
+	// points per degree is already 648M points (~10 GB).
+	MaxPointsPerDegree = 100
+
+	// MaxBboxGridPoints is the hard ceiling on the number of points a bbox
+	// grid expansion may allocate (16 MB at 16 bytes a point). It matches
+	// MMA's default max_grid_cells for a single time step.
+	MaxBboxGridPoints = 1_000_000
+
 	// radiusRingStepKm is the spacing between the concentric rings that
 	// ExpandLocations generates for a radius location.
 	radiusRingStepKm = 3
@@ -422,6 +436,12 @@ func parseRectangleValue(s string) (*RectangleLocation, error) {
 		}
 		vals[i] = v
 	}
+	if err := validateLatLon(vals[0], vals[1]); err != nil {
+		return nil, fmt.Errorf("invalid rectangle south-west corner: %w", err)
+	}
+	if err := validateLatLon(vals[2], vals[3]); err != nil {
+		return nil, fmt.Errorf("invalid rectangle north-east corner: %w", err)
+	}
 	return &RectangleLocation{
 		SouthWest: PointLocation{Lat: vals[0], Lon: vals[1]},
 		NorthEast: PointLocation{Lat: vals[2], Lon: vals[3]},
@@ -492,10 +512,16 @@ func decodeLocationPayload(t LocationType, raw json.RawMessage) (interface{}, er
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("location: invalid point payload: %w", err)
 		}
+		if err := validateLatLon(p.Lat, p.Lon); err != nil {
+			return nil, fmt.Errorf("location: invalid point payload: %w", err)
+		}
 		return p, nil
 	case LocationTypePointList:
 		var p PointListLocation
 		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid point_list payload: %w", err)
+		}
+		if err := validatePoints(p.Points, MaxPolylinePoints); err != nil {
 			return nil, fmt.Errorf("location: invalid point_list payload: %w", err)
 		}
 		return p, nil
@@ -504,10 +530,16 @@ func decodeLocationPayload(t LocationType, raw json.RawMessage) (interface{}, er
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("location: invalid polyline payload: %w", err)
 		}
+		if err := validatePoints(p.Coordinates, MaxPolylinePoints); err != nil {
+			return nil, fmt.Errorf("location: invalid polyline payload: %w", err)
+		}
 		return p, nil
 	case LocationTypeRectangle:
 		var p RectangleLocation
 		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid rectangle payload: %w", err)
+		}
+		if err := validatePoints([]PointLocation{p.NorthEast, p.SouthWest}, 2); err != nil {
 			return nil, fmt.Errorf("location: invalid rectangle payload: %w", err)
 		}
 		return p, nil
@@ -523,16 +555,25 @@ func decodeLocationPayload(t LocationType, raw json.RawMessage) (interface{}, er
 		if err := validateRadius(p.Radius); err != nil {
 			return nil, fmt.Errorf("location: invalid radius payload: %w", err)
 		}
+		if err := validateLatLon(p.Lat, p.Lon); err != nil {
+			return nil, fmt.Errorf("location: invalid radius payload: %w", err)
+		}
 		return p, nil
 	case LocationTypePolygon:
 		var p PolygonLocation
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("location: invalid polygon payload: %w", err)
 		}
+		if err := validateRings(p.Rings); err != nil {
+			return nil, fmt.Errorf("location: invalid polygon payload: %w", err)
+		}
 		return p, nil
 	case LocationTypeBbox:
 		var p BboxLocation
 		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid bbox payload: %w", err)
+		}
+		if err := validateBbox(p); err != nil {
 			return nil, fmt.Errorf("location: invalid bbox payload: %w", err)
 		}
 		return p, nil
@@ -624,6 +665,9 @@ func tryParseRadius(s string) (*RadiusLocation, bool, error) {
 	if err := validateRadius(radius); err != nil {
 		return nil, true, err
 	}
+	if err := validateLatLon(lat, lon); err != nil {
+		return nil, true, err
+	}
 
 	return &RadiusLocation{Lat: lat, Lon: lon, Radius: radius}, true, nil
 }
@@ -646,8 +690,90 @@ func validateRadius(radius float64) error {
 	return nil
 }
 
+// validateLatLon rejects a coordinate that is not a finite WGS84 position.
+//
+// strconv.ParseFloat (and encoding/json for that matter) happily returns NaN,
+// ±Inf and values like 1e300, and the expansion helpers do arithmetic on the
+// spans between such values: a "rectangle:-Inf,-Inf,Inf,Inf" made
+// expandRectangleToGrid loop until the runtime aborted with a fatal (not
+// recoverable) out-of-memory error. Every parser and the structured JSON
+// payload path therefore run their coordinates through here.
+func validateLatLon(lat, lon float64) error {
+	if math.IsNaN(lat) || math.IsInf(lat, 0) || lat < -90 || lat > 90 {
+		return fmt.Errorf("latitude must be a finite number in [-90, 90], got %g", lat)
+	}
+	if math.IsNaN(lon) || math.IsInf(lon, 0) || lon < -180 || lon > 180 {
+		return fmt.Errorf("longitude must be a finite number in [-180, 180], got %g", lon)
+	}
+	return nil
+}
+
+// validatePoints applies validateLatLon to every point and bounds the slice
+// length, so a structured JSON payload cannot carry more points than the
+// query grammar would ever produce.
+func validatePoints(pts []PointLocation, maxPoints int) error {
+	if len(pts) > maxPoints {
+		return fmt.Errorf("at most %d points are allowed, got %d", maxPoints, len(pts))
+	}
+	for i, p := range pts {
+		if err := validateLatLon(p.Lat, p.Lon); err != nil {
+			return fmt.Errorf("point %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// validateRings validates a polygon payload: every vertex must be a valid
+// coordinate and the total vertex count is capped at MaxPolygonVertices,
+// because the polygon expansion runs a point-in-polygon test against every
+// vertex for each candidate grid point.
+func validateRings(rings [][]PointLocation) error {
+	total := 0
+	for _, ring := range rings {
+		total += len(ring)
+	}
+	if total > MaxPolygonVertices {
+		return fmt.Errorf("at most %d polygon vertices are allowed, got %d", MaxPolygonVertices, total)
+	}
+	for i, ring := range rings {
+		if err := validatePoints(ring, MaxPolygonVertices); err != nil {
+			return fmt.Errorf("ring %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// validateBbox checks a bbox's edges and density. It is shared by parseBbox
+// and the structured JSON payload path. Density 0 means "use the caller's
+// default"; anything outside [0, MaxPointsPerDegree] is rejected because the
+// grid grows with its square (see ExpandBboxToGridChecked).
+func validateBbox(b BboxLocation) error {
+	if err := validateLatLon(b.South, b.West); err != nil {
+		return fmt.Errorf("bbox south-west: %w", err)
+	}
+	if err := validateLatLon(b.North, b.East); err != nil {
+		return fmt.Errorf("bbox north-east: %w", err)
+	}
+	// AC-10: south < north
+	if b.South >= b.North {
+		return fmt.Errorf("bbox south (%.4f) must be less than north (%.4f)", b.South, b.North)
+	}
+	// AC-10: west < east (antimeridian wrapping out of scope for v1)
+	if b.West >= b.East {
+		return fmt.Errorf(
+			"bbox west (%.4f) must be less than east (%.4f); antimeridian wrapping is not supported in v1",
+			b.West, b.East,
+		)
+	}
+	if b.Density < 0 || b.Density > MaxPointsPerDegree {
+		return fmt.Errorf("bbox density must be in [0, %d] points per degree, got %d", MaxPointsPerDegree, b.Density)
+	}
+	return nil
+}
+
 // parseBbox parses "west,south,east,north" into a BboxLocation.
-// AC-10 (MMA-163): Validates south < north and west < east.
+// AC-10 (MMA-163): Validates south < north and west < east; validateBbox also
+// range-checks every edge.
 func parseBbox(s string) (*BboxLocation, error) {
 	parts := strings.Split(s, ",")
 	if len(parts) != 4 {
@@ -671,37 +797,97 @@ func parseBbox(s string) (*BboxLocation, error) {
 		return nil, fmt.Errorf("invalid bbox north: %w", err)
 	}
 
-	// AC-10: south < north
-	if south >= north {
-		return nil, fmt.Errorf("bbox south (%.4f) must be less than north (%.4f)", south, north)
+	bbox := BboxLocation{West: west, South: south, East: east, North: north}
+	if err := validateBbox(bbox); err != nil {
+		return nil, err
 	}
-	// AC-10: west < east (antimeridian wrapping out of scope for v1)
-	if west >= east {
-		return nil, fmt.Errorf(
-			"bbox west (%.4f) must be less than east (%.4f); antimeridian wrapping is not supported in v1",
-			west, east,
+	return &bbox, nil
+}
+
+// BboxGridDims returns the rows and cols ExpandBboxToGridChecked would produce
+// for bbox at pointsPerDegree, without allocating. It rejects a non-finite or
+// inverted bbox, a density outside [1, MaxPointsPerDegree] and a grid larger
+// than maxPoints (<= 0 or above MaxBboxGridPoints means MaxBboxGridPoints).
+// The arithmetic is done in float64 so an absurd input cannot overflow int.
+func BboxGridDims(bbox BboxLocation, pointsPerDegree, maxPoints int) (int, int, error) {
+	if pointsPerDegree <= 0 || pointsPerDegree > MaxPointsPerDegree {
+		return 0, 0, fmt.Errorf(
+			"bbox density must be in [1, %d] points per degree, got %d", MaxPointsPerDegree, pointsPerDegree,
 		)
 	}
+	if maxPoints <= 0 || maxPoints > MaxBboxGridPoints {
+		maxPoints = MaxBboxGridPoints
+	}
+	if !isFinite(bbox.West) || !isFinite(bbox.South) || !isFinite(bbox.East) || !isFinite(bbox.North) {
+		return 0, 0, fmt.Errorf("bbox edges must be finite numbers")
+	}
+	if bbox.South > bbox.North || bbox.West > bbox.East {
+		return 0, 0, fmt.Errorf("bbox must have south <= north and west <= east")
+	}
+	rows, cols := bboxGridDimsFloat(bbox, float64(pointsPerDegree))
+	if rows*cols > float64(maxPoints) {
+		return 0, 0, fmt.Errorf(
+			"bbox grid of %.0f x %.0f points exceeds the limit of %d points; reduce the density or the area",
+			rows, cols, maxPoints,
+		)
+	}
+	return int(rows), int(cols), nil
+}
 
-	return &BboxLocation{West: west, South: south, East: east, North: north}, nil
+// ExpandBboxToGridChecked expands a BboxLocation into an evenly-spaced grid of
+// PointLocations after BboxGridDims has accepted it, so the allocation is
+// bounded by maxPoints before it happens. Returns grid points, rows and cols.
+func ExpandBboxToGridChecked(bbox BboxLocation, pointsPerDegree, maxPoints int) ([]PointLocation, int, int, error) {
+	rows, cols, err := BboxGridDims(bbox, pointsPerDegree, maxPoints)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	pts := fillBboxGrid(bbox, rows, cols)
+	return pts, rows, cols, nil
 }
 
 // ExpandBboxToGrid expands a BboxLocation into an evenly-spaced grid of PointLocations.
 // MMA-163: Uses configurable density (points per degree). Returns grid points, rows, and cols.
+//
+// It has no error return, so it never allocates more than MaxBboxGridPoints:
+// a density above MaxPointsPerDegree is clamped to it, the density is then
+// silently halved until the grid fits, and a non-finite bbox yields no points. The rows and cols returned always describe the grid
+// actually produced.
+//
+// Deprecated: use ExpandBboxToGridChecked, which reports an oversized grid as
+// an error instead of coarsening it.
 func ExpandBboxToGrid(bbox BboxLocation, pointsPerDegree int) ([]PointLocation, int, int) {
+	if !isFinite(bbox.West) || !isFinite(bbox.South) || !isFinite(bbox.East) || !isFinite(bbox.North) {
+		return nil, 0, 0
+	}
+	ppd := math.Min(float64(pointsPerDegree), MaxPointsPerDegree)
+	rows, cols := bboxGridDimsFloat(bbox, ppd)
+	// Each halving shrinks rows*cols, and at ppd -> 0 the grid is 1x1, so the
+	// loop terminates; the iteration bound is belt and braces.
+	for i := 0; i < 2100 && rows*cols > MaxBboxGridPoints; i++ {
+		ppd /= 2
+		rows, cols = bboxGridDimsFloat(bbox, ppd)
+	}
+	if rows*cols > MaxBboxGridPoints {
+		return nil, 0, 0
+	}
+	r, c := int(rows), int(cols)
+	return fillBboxGrid(bbox, r, c), r, c
+}
+
+// bboxGridDimsFloat is the rows/cols formula shared by the bbox expansions,
+// computed in float64. Both are at least 1.
+func bboxGridDimsFloat(bbox BboxLocation, pointsPerDegree float64) (float64, float64) {
+	rows := math.Round((bbox.North-bbox.South)*pointsPerDegree) + 1
+	cols := math.Round((bbox.East-bbox.West)*pointsPerDegree) + 1
+	// Ensure at least 1 row and 1 col
+	return math.Max(rows, 1), math.Max(cols, 1)
+}
+
+// fillBboxGrid lays down rows x cols points over bbox. Callers bound rows*cols.
+func fillBboxGrid(bbox BboxLocation, rows, cols int) []PointLocation {
 	latSpan := bbox.North - bbox.South
 	lonSpan := bbox.East - bbox.West
-
-	rows := int(math.Round(latSpan*float64(pointsPerDegree))) + 1
-	cols := int(math.Round(lonSpan*float64(pointsPerDegree))) + 1
-
-	// Ensure at least 1 row and 1 col
-	if rows < 1 {
-		rows = 1
-	}
-	if cols < 1 {
-		cols = 1
-	}
 
 	latStep := 0.0
 	if rows > 1 {
@@ -721,8 +907,7 @@ func ExpandBboxToGrid(bbox BboxLocation, pointsPerDegree int) ([]PointLocation, 
 			pts = append(pts, PointLocation{Lat: lat, Lon: lon})
 		}
 	}
-
-	return pts, rows, cols
+	return pts
 }
 
 func parseCoordinates(coordStr string) ([]PointLocation, error) {
@@ -742,6 +927,9 @@ func parseCoordinates(coordStr string) ([]PointLocation, error) {
 			lon, err := strconv.ParseFloat(pointParts[1], 64)
 			if err != nil {
 				return nil, fmt.Errorf("invalid longitude: %w", err)
+			}
+			if err := validateLatLon(lat, lon); err != nil {
+				return nil, err
 			}
 			coords = append(coords, PointLocation{Lat: lat, Lon: lon})
 
@@ -775,6 +963,12 @@ func parseCoordinates(coordStr string) ([]PointLocation, error) {
 			// otherwise buys an arbitrarily long slice in generatePoints.
 			if pointCount > MaxPolylinePoints {
 				return nil, fmt.Errorf("point count must be <= %d, got %d", MaxPolylinePoints, pointCount)
+			}
+			if err := validateLatLon(startLat, startLon); err != nil {
+				return nil, fmt.Errorf("invalid polyline start: %w", err)
+			}
+			if err := validateLatLon(endLat, endLon); err != nil {
+				return nil, fmt.Errorf("invalid polyline end: %w", err)
 			}
 
 			// Generate intermediate points
@@ -848,6 +1042,14 @@ func expandRectangleToGrid(rect RectangleLocation) []PointLocation {
 	latSpan := latMax - latMin
 	lonSpan := lonMax - lonMin
 
+	// Defence in depth: the parsers reject non-finite coordinates, but
+	// ExpandLocations has no error return and a hand-built Location must not
+	// be able to send steppedValues into an endless loop (an Inf span never
+	// reaches upper).
+	if !isFinite(latSpan) || !isFinite(lonSpan) {
+		return []PointLocation{{Lat: rect.SouthWest.Lat, Lon: rect.SouthWest.Lon}}
+	}
+
 	// 13: Degenerate rectangle (single point).
 	if latSpan == 0 && lonSpan == 0 {
 		return []PointLocation{{Lat: latMin, Lon: lonMin}}
@@ -880,11 +1082,18 @@ func chooseGridStep(minDim float64) float64 {
 }
 
 // gridPointCount estimates the number of grid points for the given spans and step.
+// The product is computed in float64 and saturates at math.MaxInt: converting
+// an out-of-range float to int is implementation-defined in Go, and for an
+// Inf span it used to wrap to a small number that ended the coarsening loop.
 func gridPointCount(latSpan, lonSpan, step float64) int {
-	latSteps := int(math.Ceil(latSpan/step)) + 1
-	lonSteps := int(math.Ceil(lonSpan/step)) + 1
-	return latSteps * lonSteps
+	n := (math.Ceil(latSpan/step) + 1) * (math.Ceil(lonSpan/step) + 1)
+	if math.IsNaN(n) || n >= math.MaxInt32 {
+		return math.MaxInt
+	}
+	return int(n)
 }
+
+func isFinite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 
 // generateGrid produces the flat list of grid points. The SW corner is always
 // included as the first point. The NE corner is boundary-snapped if it does
@@ -906,9 +1115,12 @@ func generateGrid(latMin, latMax, lonMin, lonMax, step float64) []PointLocation 
 
 // steppedValues returns evenly-spaced values from min to max (inclusive).
 // If max does not fall exactly on a step boundary it is appended (boundary snap, 3).
+//
+// The loop is bounded by maxGridPoints+2 iterations: once v is so large that
+// v+step == v it would otherwise never terminate.
 func steppedValues(lower, upper, step float64) []float64 {
 	vals := make([]float64, 0, 16)
-	for v := lower; v <= upper+step*1e-9; v += step {
+	for v := lower; v <= upper+step*1e-9 && len(vals) <= maxGridPoints+1; v += step {
 		// Clamp to upper to avoid floating-point overshoot.
 		if v > upper {
 			v = upper
@@ -934,6 +1146,157 @@ func steppedValues(lower, upper, step float64) []float64 {
 		vals[len(vals)-1] = upper
 	}
 	return vals
+}
+
+// minPolygonGridStep is the finest grid spacing, in degrees, used to sample a
+// polygon. It matches the finest rectangle step (chooseGridStep); weather
+// models are not resolved more finely than that.
+const minPolygonGridStep = 0.1
+
+// maxPolygonCandidates bounds the number of grid points tested against the
+// polygon, so a thin polygon with a huge bounding box stays cheap.
+const maxPolygonCandidates = 64 * maxGridPoints
+
+// polygonEdgeBudget bounds the point-in-polygon edge tests of one sampling
+// pass (candidates x vertices). Every embedded country (at most 794 vertices)
+// keeps the full maxPolygonCandidates; a structured payload near
+// MaxPolygonVertices gets proportionally fewer candidates, so a
+// self-intersecting 5000-vertex ring cannot buy ~300 ms of CPU per request.
+const polygonEdgeBudget = maxPolygonCandidates * 1000
+
+// expandPolygonToGrid samples a polygon as the points of a regular grid that
+// fall inside it, with at most maxGridPoints points.
+//
+// The shapefile provider flattens a MultiPolygon's sub-polygons into one ring
+// list, so Rings[0] is merely whichever part Natural Earth lists first: for
+// France that is French Guiana, for Norway Svalbard, for the United Kingdom
+// Northern Ireland. Returning Rings[0] — and only its boundary vertices —
+// answered "France" with South American weather. Membership is therefore
+// tested with the even-odd rule across every ring, which is also correct for
+// holes, and the grid spans the bounding box of all rings.
+//
+// The spacing is derived from the polygon's area so the inside count lands
+// near maxGridPoints, then widened until it fits. When no grid point falls
+// inside (a sliver or a very small island state) the ring vertices are
+// returned instead, thinned to maxGridPoints.
+func expandPolygonToGrid(rings [][]PointLocation) []PointLocation {
+	latMin, latMax := math.Inf(1), math.Inf(-1)
+	lonMin, lonMax := math.Inf(1), math.Inf(-1)
+	vertices := 0
+	area := 0.0
+	for _, ring := range rings {
+		for _, p := range ring {
+			latMin, latMax = math.Min(latMin, p.Lat), math.Max(latMax, p.Lat)
+			lonMin, lonMax = math.Min(lonMin, p.Lon), math.Max(lonMax, p.Lon)
+		}
+		vertices += len(ring)
+		area += math.Abs(ringArea(ring))
+	}
+	if vertices == 0 {
+		return nil
+	}
+	latSpan, lonSpan := latMax-latMin, lonMax-lonMin
+	if !isFinite(latSpan) || !isFinite(lonSpan) {
+		return nil
+	}
+	if latSpan == 0 && lonSpan == 0 {
+		return []PointLocation{{Lat: latMin, Lon: lonMin}}
+	}
+
+	step := polygonGridStep(latSpan, lonSpan, area, vertices)
+
+	var pts []PointLocation
+	for range 64 {
+		pts = pts[:0]
+		for _, lat := range centredValues(latMin, latSpan, step) {
+			for _, lon := range centredValues(lonMin, lonSpan, step) {
+				if pointInRings(lat, lon, rings) {
+					pts = append(pts, PointLocation{Lat: lat, Lon: lon})
+				}
+			}
+		}
+		if len(pts) <= maxGridPoints {
+			break
+		}
+		// The inside count falls with the square of the step: jump straight
+		// to the spacing that fits instead of widening by 25% per pass (a
+		// self-intersecting ring whose signed areas cancel starts far too fine).
+		step *= math.Max(1.25, math.Sqrt(float64(len(pts))/maxGridPoints)*1.05)
+	}
+	if len(pts) > 0 && len(pts) <= maxGridPoints {
+		return pts
+	}
+	return thinVertices(rings, vertices)
+}
+
+// polygonGridStep is the initial sampling step for expandPolygonToGrid: the
+// spacing at which area holds about maxGridPoints points, widened until the
+// candidate grid over the bounding box fits both maxPolygonCandidates and
+// polygonEdgeBudget for the given vertex count.
+func polygonGridStep(latSpan, lonSpan, area float64, vertices int) float64 {
+	maxCandidates := min(maxPolygonCandidates, max(maxGridPoints, polygonEdgeBudget/max(vertices, 1)))
+	step := math.Max(math.Sqrt(area/maxGridPoints), minPolygonGridStep)
+	for gridPointCount(latSpan, lonSpan, step) > maxCandidates {
+		step *= 1.25
+	}
+	return step
+}
+
+// centredValues returns grid coordinates spaced step apart across
+// [lower, lower+span], centred so the margin is equal at both ends.
+func centredValues(lower, span, step float64) []float64 {
+	n := int(math.Floor(span/step)) + 1
+	offset := (span - float64(n-1)*step) / 2
+	vals := make([]float64, n)
+	for i := range vals {
+		vals[i] = lower + offset + float64(i)*step
+	}
+	return vals
+}
+
+// pointInRings reports whether (lat, lon) lies inside the polygon formed by
+// rings under the even-odd rule: a point is inside when a ray from it crosses
+// the ring edges an odd number of times in total.
+func pointInRings(lat, lon float64, rings [][]PointLocation) bool {
+	inside := false
+	for _, ring := range rings {
+		n := len(ring)
+		for i, j := 0, n-1; i < n; j, i = i, i+1 {
+			a, b := ring[i], ring[j]
+			if (a.Lat > lat) != (b.Lat > lat) &&
+				lon < (b.Lon-a.Lon)*(lat-a.Lat)/(b.Lat-a.Lat)+a.Lon {
+				inside = !inside
+			}
+		}
+	}
+	return inside
+}
+
+// ringArea is the signed shoelace area of a ring in square degrees.
+func ringArea(ring []PointLocation) float64 {
+	sum := 0.0
+	n := len(ring)
+	for i, j := 0, n-1; i < n; j, i = i, i+1 {
+		sum += (ring[j].Lon - ring[i].Lon) * (ring[j].Lat + ring[i].Lat)
+	}
+	return sum / 2
+}
+
+// thinVertices returns the vertices of all rings, evenly thinned to at most
+// maxGridPoints.
+func thinVertices(rings [][]PointLocation, total int) []PointLocation {
+	stride := (total + maxGridPoints - 1) / maxGridPoints
+	pts := make([]PointLocation, 0, min(total, maxGridPoints))
+	i := 0
+	for _, ring := range rings {
+		for _, p := range ring {
+			if i%stride == 0 && len(pts) < maxGridPoints {
+				pts = append(pts, p)
+			}
+			i++
+		}
+	}
+	return pts
 }
 
 // ExpandLocations resolves a Location into a flat slice of PointLocations.
@@ -969,12 +1332,13 @@ func ExpandLocations(loc Location) []PointLocation {
 			return expandRectangleToGrid(*v)
 		}
 	case LocationTypePolygon:
-		// 5: Return the outer ring (index 0) points only.
+		// Grid points inside the polygon, across ALL rings (see
+		// expandPolygonToGrid for why Rings[0] alone is wrong).
 		if v, ok := loc.Payload.(PolygonLocation); ok && len(v.Rings) > 0 {
-			return v.Rings[0]
+			return expandPolygonToGrid(v.Rings)
 		}
 		if v, ok := loc.Payload.(*PolygonLocation); ok && v != nil && len(v.Rings) > 0 {
-			return v.Rings[0]
+			return expandPolygonToGrid(v.Rings)
 		}
 	case LocationTypeBbox:
 		// MMA-163: Bbox expansion is handled separately in the controller

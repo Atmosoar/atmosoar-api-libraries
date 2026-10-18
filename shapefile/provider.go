@@ -12,6 +12,8 @@ import (
 	"go.uber.org/zap"
 )
 
+//go:generate go run ./internal/gen
+
 //go:embed ne_110m_admin_0_countries.geojson
 var embeddedGeoJSON []byte
 

@@ -134,36 +134,36 @@ func validateAgainst(k Key, raw json.RawMessage) (any, error) {
 	case KindBool:
 		var b bool
 		if err := json.Unmarshal(raw, &b); err != nil {
-			return nil, fmt.Errorf("%s: expected bool: %w", k.Name, err)
+			return nil, invalidf("%s: expected bool: %w", k.Name, err)
 		}
 		return b, nil
 
 	case KindString:
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
-			return nil, fmt.Errorf("%s: expected string: %w", k.Name, err)
+			return nil, invalidf("%s: expected string: %w", k.Name, err)
 		}
 		return s, nil
 
 	case KindEnum:
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
-			return nil, fmt.Errorf("%s: expected string: %w", k.Name, err)
+			return nil, invalidf("%s: expected string: %w", k.Name, err)
 		}
 		for _, e := range k.Enum {
 			if e == s {
 				return s, nil
 			}
 		}
-		return nil, fmt.Errorf("%s: %q not in allowed set %v", k.Name, s, k.Enum)
+		return nil, invalidf("%s: %q not in allowed set %v", k.Name, shown(k, s), k.Enum)
 
 	case KindInt:
 		var f float64
 		if err := json.Unmarshal(raw, &f); err != nil {
-			return nil, fmt.Errorf("%s: expected number: %w", k.Name, err)
+			return nil, invalidf("%s: expected number: %w", k.Name, err)
 		}
 		if f != float64(int64(f)) {
-			return nil, fmt.Errorf("%s: expected integer, got %v", k.Name, f)
+			return nil, invalidf("%s: expected integer, got %v", k.Name, shown(k, f))
 		}
 		if err := checkBounds(k, f); err != nil {
 			return nil, err
@@ -173,7 +173,7 @@ func validateAgainst(k Key, raw json.RawMessage) (any, error) {
 	case KindFloat:
 		var f float64
 		if err := json.Unmarshal(raw, &f); err != nil {
-			return nil, fmt.Errorf("%s: expected number: %w", k.Name, err)
+			return nil, invalidf("%s: expected number: %w", k.Name, err)
 		}
 		if err := checkBounds(k, f); err != nil {
 			return nil, err
@@ -183,7 +183,7 @@ func validateAgainst(k Key, raw json.RawMessage) (any, error) {
 	case KindDuration:
 		var f float64
 		if err := json.Unmarshal(raw, &f); err != nil {
-			return nil, fmt.Errorf("%s: expected number of seconds: %w", k.Name, err)
+			return nil, invalidf("%s: expected number of seconds: %w", k.Name, err)
 		}
 		if err := checkBounds(k, f); err != nil {
 			return nil, err
@@ -200,12 +200,27 @@ func checkBounds(k Key, f float64) error {
 		return nil
 	}
 	if k.Bounds.Min != nil && f < *k.Bounds.Min {
-		return fmt.Errorf("%s: %v below minimum %v", k.Name, f, *k.Bounds.Min)
+		return invalidf("%s: %v below minimum %v", k.Name, shown(k, f), *k.Bounds.Min)
 	}
 	if k.Bounds.Max != nil && f > *k.Bounds.Max {
-		return fmt.Errorf("%s: %v above maximum %v", k.Name, f, *k.Bounds.Max)
+		return invalidf("%s: %v above maximum %v", k.Name, shown(k, f), *k.Bounds.Max)
 	}
 	return nil
+}
+
+// invalidf builds a validation error wrapped in ErrInvalidValue, so callers
+// can tell a rejected value (a client error) from a store failure.
+func invalidf(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrInvalidValue}, args...)...)
+}
+
+// shown returns v for an error message, or a placeholder for a Secret key so
+// a rejected secret is never echoed back to the caller or into logs.
+func shown(k Key, v any) any {
+	if k.Secret {
+		return "<redacted>"
+	}
+	return v
 }
 
 // normalizeValue coerces a Go value to the canonical type for a Kind so that
