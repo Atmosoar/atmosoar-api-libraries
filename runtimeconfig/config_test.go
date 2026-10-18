@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -235,4 +237,39 @@ func TestConcurrentReadDuringSwap(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// yieldingStore widens the window between persist and publish so concurrent
+// writers would interleave their load-clone-store without Manager.writeMu.
+type yieldingStore struct{ *MemStore }
+
+func (s yieldingStore) Upsert(ctx context.Context, key string, value json.RawMessage) error {
+	runtime.Gosched()
+	return s.MemStore.Upsert(ctx, key, value)
+}
+
+func TestConcurrentApplyKeepsEveryKey(t *testing.T) {
+	const n = 100
+	reg := NewRegistry()
+	for i := 0; i < n; i++ {
+		reg.Register(Key{Name: fmt.Sprintf("k%03d", i), Kind: KindInt, Default: 0, Mutable: true})
+	}
+	m := NewManager(reg, yieldingStore{NewMemStore()}, zap.NewNop().Sugar())
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := m.Apply(ctx, fmt.Sprintf("k%03d", i), json.RawMessage(`7`)); err != nil {
+				t.Errorf("Apply k%03d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, v := range m.MergedView() {
+		if v.Source != "override" {
+			t.Fatalf("%s lost its concurrent override (source=%s)", v.Key, v.Source)
+		}
+	}
 }

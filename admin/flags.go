@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"go.uber.org/zap"
@@ -39,6 +40,9 @@ type FlagSet struct {
 	known  []Flag
 	byName map[string]Flag
 	state  atomic.Pointer[map[string]bool]
+	// writeMu serialises persist-then-publish in LoadAtBoot and Set so a
+	// concurrent toggle of another flag is never dropped from the snapshot.
+	writeMu sync.Mutex
 }
 
 // NewFlagSet builds a flag set over store with the given known flags. Pass a
@@ -64,6 +68,8 @@ func NewFlagSet(store runtimeconfig.Store, logger *zap.SugaredLogger, known []Fl
 
 // LoadAtBoot overlays persisted flag values onto the declared defaults.
 func (f *FlagSet) LoadAtBoot(ctx context.Context) error {
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
 	stored, err := f.store.LoadAll(ctx)
 	if err != nil {
 		f.logger.Warnw("flags: load at boot failed; using defaults", "error", err)
@@ -99,11 +105,14 @@ func (f *FlagSet) Set(ctx context.Context, name string, value bool) error {
 		return ErrUnknownFlag
 	}
 	raw, _ := json.Marshal(value)
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
 	if err := f.store.Upsert(ctx, name, raw); err != nil {
 		return fmt.Errorf("persist flag %s: %w", name, err)
 	}
-	next := make(map[string]bool, len(*f.state.Load()))
-	for k, v := range *f.state.Load() {
+	cur := *f.state.Load()
+	next := make(map[string]bool, len(cur))
+	for k, v := range cur {
 		next[k] = v
 	}
 	next[name] = value

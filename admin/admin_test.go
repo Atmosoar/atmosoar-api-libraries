@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,5 +235,40 @@ func TestPutConfigStoreFailureIs500(t *testing.T) {
 	w = do(r, http.MethodPut, "/admin/test/config/max_results", `{"value": 999999}`, true)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "INVALID_VALUE") {
 		t.Fatalf("invalid value: want 400 INVALID_VALUE, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// yieldingStore widens the window between persist and publish so concurrent
+// toggles would interleave their copy-and-store without FlagSet.writeMu.
+type yieldingStore struct{ *runtimeconfig.MemStore }
+
+func (s yieldingStore) Upsert(ctx context.Context, key string, value json.RawMessage) error {
+	runtime.Gosched()
+	return s.MemStore.Upsert(ctx, key, value)
+}
+
+func TestConcurrentFlagSetKeepsEveryFlag(t *testing.T) {
+	const n = 100
+	known := make([]Flag, n)
+	for i := range known {
+		known[i] = Flag{Name: fmt.Sprintf("f%03d", i)}
+	}
+	fs := NewFlagSet(yieldingStore{runtimeconfig.NewMemStore()}, zap.NewNop().Sugar(), known)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for _, fl := range known {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := fs.Set(ctx, name, true); err != nil {
+				t.Errorf("Set %s: %v", name, err)
+			}
+		}(fl.Name)
+	}
+	wg.Wait()
+	for _, v := range fs.Snapshot() {
+		if !v.Value {
+			t.Fatalf("%s lost its concurrent toggle", v.Name)
+		}
 	}
 }
