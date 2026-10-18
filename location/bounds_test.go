@@ -271,3 +271,44 @@ func TestExpandLocations_CountryPolygonsCoverMainland(t *testing.T) {
 		})
 	}
 }
+
+// figureEight returns one self-intersecting ring of n vertices whose two lobes
+// span the whole longitude range with opposite orientation, so its signed
+// shoelace area cancels to ~0 while its bounding box is nearly the globe.
+func figureEight(n int) []PointLocation {
+	edge := func(lat, fromLon, toLon float64) []PointLocation {
+		pts := make([]PointLocation, 0, n/4)
+		for i := 0; i < n/4; i++ {
+			pts = append(pts, PointLocation{Lat: lat, Lon: fromLon + (toLon-fromLon)*float64(i)/float64(n/4)})
+		}
+		return pts
+	}
+	var ring []PointLocation
+	ring = append(ring, edge(-80, -179, 179)...)
+	ring = append(ring, edge(0, 179, -179)...)
+	ring = append(ring, edge(80, -179, 179)...)
+	ring = append(ring, edge(0, 179, -179)...)
+	return ring
+}
+
+// TestExpandPolygonToGrid_BoundsWorkForLargePayloads: a structured polygon at
+// MaxPolygonVertices whose areas cancel started at the finest step over a
+// global bounding box and cost ~300 ms of point-in-polygon tests per request.
+// The candidate grid now shrinks with the vertex count.
+func TestExpandPolygonToGrid_BoundsWorkForLargePayloads(t *testing.T) {
+	ring := figureEight(MaxPolygonVertices)
+	require.Len(t, ring, MaxPolygonVertices)
+	require.InDelta(t, 0, ringArea(ring), 1e-6, "lobes must cancel for the test to mean anything")
+
+	step := polygonGridStep(160, 358, math.Abs(ringArea(ring)), len(ring))
+	assert.LessOrEqual(t, gridPointCount(160, 358, step)*len(ring), polygonEdgeBudget)
+
+	pts := expandPolygonToGrid([][]PointLocation{ring})
+	assert.NotEmpty(t, pts)
+	assert.LessOrEqual(t, len(pts), maxGridPoints)
+
+	// Embedded countries stay at the full candidate grid.
+	assert.Equal(t,
+		math.Max(math.Sqrt(1000.0/maxGridPoints), minPolygonGridStep),
+		polygonGridStep(10, 10, 1000, 794))
+}

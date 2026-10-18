@@ -850,8 +850,8 @@ func ExpandBboxToGridChecked(bbox BboxLocation, pointsPerDegree, maxPoints int) 
 // MMA-163: Uses configurable density (points per degree). Returns grid points, rows, and cols.
 //
 // It has no error return, so it never allocates more than MaxBboxGridPoints:
-// the density is silently halved until the grid fits, and a non-finite bbox
-// yields no points. The rows and cols returned always describe the grid
+// a density above MaxPointsPerDegree is clamped to it, the density is then
+// silently halved until the grid fits, and a non-finite bbox yields no points. The rows and cols returned always describe the grid
 // actually produced.
 //
 // Deprecated: use ExpandBboxToGridChecked, which reports an oversized grid as
@@ -1157,6 +1157,13 @@ const minPolygonGridStep = 0.1
 // polygon, so a thin polygon with a huge bounding box stays cheap.
 const maxPolygonCandidates = 64 * maxGridPoints
 
+// polygonEdgeBudget bounds the point-in-polygon edge tests of one sampling
+// pass (candidates x vertices). Every embedded country (at most 794 vertices)
+// keeps the full maxPolygonCandidates; a structured payload near
+// MaxPolygonVertices gets proportionally fewer candidates, so a
+// self-intersecting 5000-vertex ring cannot buy ~300 ms of CPU per request.
+const polygonEdgeBudget = maxPolygonCandidates * 1000
+
 // expandPolygonToGrid samples a polygon as the points of a regular grid that
 // fall inside it, with at most maxGridPoints points.
 //
@@ -1196,10 +1203,7 @@ func expandPolygonToGrid(rings [][]PointLocation) []PointLocation {
 		return []PointLocation{{Lat: latMin, Lon: lonMin}}
 	}
 
-	step := math.Max(math.Sqrt(area/maxGridPoints), minPolygonGridStep)
-	for float64(gridPointCount(latSpan, lonSpan, step)) > maxPolygonCandidates {
-		step *= 1.25
-	}
+	step := polygonGridStep(latSpan, lonSpan, area, vertices)
 
 	var pts []PointLocation
 	for range 64 {
@@ -1214,12 +1218,28 @@ func expandPolygonToGrid(rings [][]PointLocation) []PointLocation {
 		if len(pts) <= maxGridPoints {
 			break
 		}
-		step *= 1.25
+		// The inside count falls with the square of the step: jump straight
+		// to the spacing that fits instead of widening by 25% per pass (a
+		// self-intersecting ring whose signed areas cancel starts far too fine).
+		step *= math.Max(1.25, math.Sqrt(float64(len(pts))/maxGridPoints)*1.05)
 	}
 	if len(pts) > 0 && len(pts) <= maxGridPoints {
 		return pts
 	}
 	return thinVertices(rings, vertices)
+}
+
+// polygonGridStep is the initial sampling step for expandPolygonToGrid: the
+// spacing at which area holds about maxGridPoints points, widened until the
+// candidate grid over the bounding box fits both maxPolygonCandidates and
+// polygonEdgeBudget for the given vertex count.
+func polygonGridStep(latSpan, lonSpan, area float64, vertices int) float64 {
+	maxCandidates := min(maxPolygonCandidates, max(maxGridPoints, polygonEdgeBudget/max(vertices, 1)))
+	step := math.Max(math.Sqrt(area/maxGridPoints), minPolygonGridStep)
+	for gridPointCount(latSpan, lonSpan, step) > maxCandidates {
+		step *= 1.25
+	}
+	return step
 }
 
 // centredValues returns grid coordinates spaced step apart across

@@ -106,8 +106,9 @@ This repo publishes semantic Go module versions. Consumers pin to tagged version
 - **`location` caps bbox grids.** New `BboxGridDims` and
   `ExpandBboxToGridChecked` reject a density outside [1, `MaxPointsPerDegree`
   = 100] or a grid above `MaxBboxGridPoints` (1,000,000) *before* allocating.
-  `ExpandBboxToGrid` is deprecated; it now halves the density until the grid
-  fits instead of allocating without bound. A bbox JSON payload with a
+  `ExpandBboxToGrid` is deprecated; it now clamps the density to 100 and
+  halves it until the grid fits instead of allocating without bound (the
+  rows/cols it returns describe the grid actually produced). A bbox JSON payload with a
   `density` outside [0, 100] is rejected. Consumers (MMA) should call
   `BboxGridDims` with their own cell budget before expanding.
 - **Behaviour fix: polygon expansion covers the whole country.**
