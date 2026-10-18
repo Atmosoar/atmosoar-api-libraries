@@ -524,7 +524,8 @@ func TestParseLocation_PolygonFallbackNilProvider(t *testing.T) {
 	assert.Equal(t, LocationTypeRectangle, loc.Type, "nil provider should fall back to rectangle")
 }
 
-// TestExpandLocations_Polygon tests 5: ExpandLocations for polygon returns outer ring.
+// TestExpandLocations_Polygon tests 5: ExpandLocations for polygon returns the
+// grid points inside the polygon (holes excluded), not the ring vertices.
 func TestExpandLocations_Polygon(t *testing.T) {
 	outerRing := []PointLocation{
 		{Lat: 55.0, Lon: 15.0},
@@ -540,22 +541,37 @@ func TestExpandLocations_Polygon(t *testing.T) {
 		{Lat: 50.0, Lon: 10.0},
 	}
 
-	t.Run("polygon value returns outer ring", func(t *testing.T) {
+	t.Run("polygon value returns interior grid points outside holes", func(t *testing.T) {
 		loc := Location{
 			Type:    LocationTypePolygon,
 			Payload: PolygonLocation{Rings: [][]PointLocation{outerRing, innerRing}},
 		}
 		pts := ExpandLocations(loc)
-		assert.Equal(t, outerRing, pts, "should return only the outer ring")
+		require.NotEmpty(t, pts)
+		assert.LessOrEqual(t, len(pts), maxGridPoints)
+		assert.Greater(t, len(pts), maxGridPoints/2, "a 9x8 degree box should be sampled densely")
+		for _, p := range pts {
+			assert.True(t, p.Lat > 47 && p.Lat < 55 && p.Lon > 6 && p.Lon < 15, "point %v outside outer ring", p)
+			assert.False(t, pointInRings(p.Lat, p.Lon, [][]PointLocation{innerRing}), "point %v inside the hole", p)
+		}
 	})
 
-	t.Run("polygon pointer returns outer ring", func(t *testing.T) {
+	t.Run("polygon pointer returns interior grid points", func(t *testing.T) {
 		loc := Location{
 			Type:    LocationTypePolygon,
 			Payload: &PolygonLocation{Rings: [][]PointLocation{outerRing}},
 		}
 		pts := ExpandLocations(loc)
-		assert.Equal(t, outerRing, pts)
+		require.NotEmpty(t, pts)
+		assert.LessOrEqual(t, len(pts), maxGridPoints)
+	})
+
+	t.Run("polygon smaller than the grid step falls back to its vertices", func(t *testing.T) {
+		sliver := []PointLocation{{Lat: 50, Lon: 8}, {Lat: 50.01, Lon: 8}, {Lat: 50.01, Lon: 8.01}, {Lat: 50, Lon: 8}}
+		pts := ExpandLocations(
+			Location{Type: LocationTypePolygon, Payload: PolygonLocation{Rings: [][]PointLocation{sliver}}},
+		)
+		assert.Equal(t, sliver, pts)
 	})
 
 	t.Run("polygon with no rings returns nil", func(t *testing.T) {

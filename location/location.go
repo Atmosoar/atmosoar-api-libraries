@@ -1148,6 +1148,137 @@ func steppedValues(lower, upper, step float64) []float64 {
 	return vals
 }
 
+// minPolygonGridStep is the finest grid spacing, in degrees, used to sample a
+// polygon. It matches the finest rectangle step (chooseGridStep); weather
+// models are not resolved more finely than that.
+const minPolygonGridStep = 0.1
+
+// maxPolygonCandidates bounds the number of grid points tested against the
+// polygon, so a thin polygon with a huge bounding box stays cheap.
+const maxPolygonCandidates = 64 * maxGridPoints
+
+// expandPolygonToGrid samples a polygon as the points of a regular grid that
+// fall inside it, with at most maxGridPoints points.
+//
+// The shapefile provider flattens a MultiPolygon's sub-polygons into one ring
+// list, so Rings[0] is merely whichever part Natural Earth lists first: for
+// France that is French Guiana, for Norway Svalbard, for the United Kingdom
+// Northern Ireland. Returning Rings[0] — and only its boundary vertices —
+// answered "France" with South American weather. Membership is therefore
+// tested with the even-odd rule across every ring, which is also correct for
+// holes, and the grid spans the bounding box of all rings.
+//
+// The spacing is derived from the polygon's area so the inside count lands
+// near maxGridPoints, then widened until it fits. When no grid point falls
+// inside (a sliver or a very small island state) the ring vertices are
+// returned instead, thinned to maxGridPoints.
+func expandPolygonToGrid(rings [][]PointLocation) []PointLocation {
+	latMin, latMax := math.Inf(1), math.Inf(-1)
+	lonMin, lonMax := math.Inf(1), math.Inf(-1)
+	vertices := 0
+	area := 0.0
+	for _, ring := range rings {
+		for _, p := range ring {
+			latMin, latMax = math.Min(latMin, p.Lat), math.Max(latMax, p.Lat)
+			lonMin, lonMax = math.Min(lonMin, p.Lon), math.Max(lonMax, p.Lon)
+		}
+		vertices += len(ring)
+		area += math.Abs(ringArea(ring))
+	}
+	if vertices == 0 {
+		return nil
+	}
+	latSpan, lonSpan := latMax-latMin, lonMax-lonMin
+	if !isFinite(latSpan) || !isFinite(lonSpan) {
+		return nil
+	}
+	if latSpan == 0 && lonSpan == 0 {
+		return []PointLocation{{Lat: latMin, Lon: lonMin}}
+	}
+
+	step := math.Max(math.Sqrt(area/maxGridPoints), minPolygonGridStep)
+	for float64(gridPointCount(latSpan, lonSpan, step)) > maxPolygonCandidates {
+		step *= 1.25
+	}
+
+	var pts []PointLocation
+	for range 64 {
+		pts = pts[:0]
+		for _, lat := range centredValues(latMin, latSpan, step) {
+			for _, lon := range centredValues(lonMin, lonSpan, step) {
+				if pointInRings(lat, lon, rings) {
+					pts = append(pts, PointLocation{Lat: lat, Lon: lon})
+				}
+			}
+		}
+		if len(pts) <= maxGridPoints {
+			break
+		}
+		step *= 1.25
+	}
+	if len(pts) > 0 && len(pts) <= maxGridPoints {
+		return pts
+	}
+	return thinVertices(rings, vertices)
+}
+
+// centredValues returns grid coordinates spaced step apart across
+// [lower, lower+span], centred so the margin is equal at both ends.
+func centredValues(lower, span, step float64) []float64 {
+	n := int(math.Floor(span/step)) + 1
+	offset := (span - float64(n-1)*step) / 2
+	vals := make([]float64, n)
+	for i := range vals {
+		vals[i] = lower + offset + float64(i)*step
+	}
+	return vals
+}
+
+// pointInRings reports whether (lat, lon) lies inside the polygon formed by
+// rings under the even-odd rule: a point is inside when a ray from it crosses
+// the ring edges an odd number of times in total.
+func pointInRings(lat, lon float64, rings [][]PointLocation) bool {
+	inside := false
+	for _, ring := range rings {
+		n := len(ring)
+		for i, j := 0, n-1; i < n; j, i = i, i+1 {
+			a, b := ring[i], ring[j]
+			if (a.Lat > lat) != (b.Lat > lat) &&
+				lon < (b.Lon-a.Lon)*(lat-a.Lat)/(b.Lat-a.Lat)+a.Lon {
+				inside = !inside
+			}
+		}
+	}
+	return inside
+}
+
+// ringArea is the signed shoelace area of a ring in square degrees.
+func ringArea(ring []PointLocation) float64 {
+	sum := 0.0
+	n := len(ring)
+	for i, j := 0, n-1; i < n; j, i = i, i+1 {
+		sum += (ring[j].Lon - ring[i].Lon) * (ring[j].Lat + ring[i].Lat)
+	}
+	return sum / 2
+}
+
+// thinVertices returns the vertices of all rings, evenly thinned to at most
+// maxGridPoints.
+func thinVertices(rings [][]PointLocation, total int) []PointLocation {
+	stride := (total + maxGridPoints - 1) / maxGridPoints
+	pts := make([]PointLocation, 0, min(total, maxGridPoints))
+	i := 0
+	for _, ring := range rings {
+		for _, p := range ring {
+			if i%stride == 0 && len(pts) < maxGridPoints {
+				pts = append(pts, p)
+			}
+			i++
+		}
+	}
+	return pts
+}
+
 // ExpandLocations resolves a Location into a flat slice of PointLocations.
 func ExpandLocations(loc Location) []PointLocation {
 	switch loc.Type {
@@ -1181,12 +1312,13 @@ func ExpandLocations(loc Location) []PointLocation {
 			return expandRectangleToGrid(*v)
 		}
 	case LocationTypePolygon:
-		// 5: Return the outer ring (index 0) points only.
+		// Grid points inside the polygon, across ALL rings (see
+		// expandPolygonToGrid for why Rings[0] alone is wrong).
 		if v, ok := loc.Payload.(PolygonLocation); ok && len(v.Rings) > 0 {
-			return v.Rings[0]
+			return expandPolygonToGrid(v.Rings)
 		}
 		if v, ok := loc.Payload.(*PolygonLocation); ok && v != nil && len(v.Rings) > 0 {
-			return v.Rings[0]
+			return expandPolygonToGrid(v.Rings)
 		}
 	case LocationTypeBbox:
 		// MMA-163: Bbox expansion is handled separately in the controller

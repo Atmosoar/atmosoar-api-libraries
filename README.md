@@ -110,6 +110,14 @@ This repo publishes semantic Go module versions. Consumers pin to tagged version
   fits instead of allocating without bound. A bbox JSON payload with a
   `density` outside [0, 100] is rejected. Consumers (MMA) should call
   `BboxGridDims` with their own cell budget before expanding.
+- **Behaviour fix: polygon expansion covers the whole country.**
+  `ExpandLocations` on a polygon used to return the vertices of `Rings[0]`,
+  which for a flattened MultiPolygon is whichever part Natural Earth lists
+  first: France resolved to French Guiana, Norway to Svalbard, the United
+  Kingdom to Northern Ireland. It now returns up to 250 grid points inside the
+  polygon (even-odd rule across all rings, holes excluded), falling back to
+  the ring vertices when the polygon is smaller than the grid. Responses for
+  country shortcuts change content, so release this as a minor version.
 
 ### v0.5.2
 

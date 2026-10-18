@@ -5,6 +5,8 @@ import (
 	"math"
 	"testing"
 
+	"atmosoar.io/atmosoar-api-libraries/shapefile"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -194,4 +196,49 @@ func TestExpandBboxToGrid_ClampsInsteadOfOOM(t *testing.T) {
 	assert.Len(t, pts, 9)
 	assert.Equal(t, 3, rows)
 	assert.Equal(t, 3, cols)
+}
+
+// TestExpandLocations_CountryPolygonsCoverMainland is the regression test for
+// the flattened-MultiPolygon bug: Rings[0] of France is French Guiana, of
+// Norway Svalbard and of the United Kingdom Northern Ireland, and expansion
+// used to return only that ring's vertices.
+func TestExpandLocations_CountryPolygonsCoverMainland(t *testing.T) {
+	sp := shapefile.NewShapeProvider(nil)
+	type box struct{ latMin, latMax, lonMin, lonMax float64 }
+	tests := []struct {
+		name     string
+		mainland box
+		minIn    int
+	}{
+		{"France", box{42, 51.2, -5, 8.5}, 20},
+		{"Norway", box{57.9, 71.5, 4.5, 31.5}, 20},
+		{"United Kingdom", box{49.9, 59, -8.2, 2}, 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := sp.Lookup(tt.name)
+			require.NotNil(t, cp)
+			rings := make([][]PointLocation, 0, len(cp.Rings))
+			for _, r := range cp.Rings {
+				ring := make([]PointLocation, 0, len(r))
+				for _, p := range r {
+					ring = append(ring, PointLocation{Lat: p.Lat, Lon: p.Lon})
+				}
+				rings = append(rings, ring)
+			}
+			pts := ExpandLocations(Location{Type: LocationTypePolygon, Payload: PolygonLocation{Rings: rings}})
+			require.NotEmpty(t, pts)
+			assert.LessOrEqual(t, len(pts), maxGridPoints)
+
+			in := 0
+			for _, p := range pts {
+				assert.True(t, pointInRings(p.Lat, p.Lon, rings), "%v is outside %s", p, tt.name)
+				m := tt.mainland
+				if p.Lat >= m.latMin && p.Lat <= m.latMax && p.Lon >= m.lonMin && p.Lon <= m.lonMax {
+					in++
+				}
+			}
+			assert.GreaterOrEqual(t, in, tt.minIn, "%s must be sampled across its mainland", tt.name)
+		})
+	}
 }
