@@ -97,6 +97,20 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
 
+### Unreleased
+
+- **`location` validates coordinates.** Every parser and the structured JSON
+  payload path reject NaN, ±Inf, latitudes outside [-90, 90] and longitudes
+  outside [-180, 180]. A `rectangle:-Inf,-Inf,Inf,Inf` used to loop in
+  `ExpandLocations` until the process died with a fatal out-of-memory error.
+- **`location` caps bbox grids.** New `BboxGridDims` and
+  `ExpandBboxToGridChecked` reject a density outside [1, `MaxPointsPerDegree`
+  = 100] or a grid above `MaxBboxGridPoints` (1,000,000) *before* allocating.
+  `ExpandBboxToGrid` is deprecated; it now halves the density until the grid
+  fits instead of allocating without bound. A bbox JSON payload with a
+  `density` outside [0, 100] is rejected. Consumers (MMA) should call
+  `BboxGridDims` with their own cell budget before expanding.
+
 ### v0.5.2
 
 - `chart` knows `evapotranspiration` (reference ET0, FAO-56, mm/h, bars from

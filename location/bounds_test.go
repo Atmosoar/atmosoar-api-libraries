@@ -1,0 +1,197 @@
+package location
+
+import (
+	"encoding/json"
+	"math"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestParseLocation_RejectsNonFiniteAndOutOfRange covers the one-request OOM:
+// strconv.ParseFloat accepts NaN, Inf and 1e300, and a rectangle built from
+// them sent ExpandLocations into an endless loop that ended in a fatal (not
+// recoverable) out-of-memory error. Every grammar must now fail at parse time.
+func TestParseLocation_RejectsNonFiniteAndOutOfRange(t *testing.T) {
+	inputs := []string{
+		"NaN,NaN",
+		"Inf,0",
+		"0,-Inf",
+		"91,0",
+		"0,181",
+		"1e300,1e300|-1e300,-1e300",
+		"point:NaN,1",
+		"polyline:1,2;1e300,3",
+		"1,2,NaN,4,10",
+		"1,2,3,400,10",
+		"rectangle:-Inf,-Inf,Inf,Inf",
+		"rectangle:-90,-1e17,90,1e17",
+		"rectangle:95,0|-95,0",
+		"radius:NaN,1|10",
+		"91,0|10",
+		"bbox:-Inf,-90,Inf,90",
+		"bbox:-200,-90,180,90",
+		"bbox:0,-91,10,10",
+		"bbox:NaN,0,1,1",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			_, err := ParseLocation(in)
+			require.Error(t, err)
+		})
+	}
+
+	// The edges of the valid range still parse.
+	for _, in := range []string{"90,180", "-90,-180", "rectangle:-90,-180,90,180", "bbox:-180,-90,180,90"} {
+		t.Run("valid "+in, func(t *testing.T) {
+			_, err := ParseLocation(in)
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestUnmarshalLocation_RejectsOutOfRange covers the structured JSON payload
+// path, which bypasses the string parsers.
+func TestUnmarshalLocation_RejectsOutOfRange(t *testing.T) {
+	bad := []string{
+		`{"type":"point","payload":{"lat":1e300,"lon":0}}`,
+		`{"type":"point_list","payload":{"points":[{"lat":0,"lon":0},{"lat":0,"lon":999}]}}`,
+		`{"type":"polyline","payload":{"polyline":[{"lat":-100,"lon":0}]}}`,
+		`{"type":"rectangle","payload":{"north_east":{"lat":1e17,"lon":1e17},"south_west":{"lat":0,"lon":0}}}`,
+		`{"type":"radius","payload":{"lat":200,"lon":0,"radius":10}}`,
+		`{"type":"polygon","payload":{"rings":[[{"lat":0,"lon":0},{"lat":1,"lon":500},{"lat":1,"lon":1}]]}}`,
+		`{"type":"bbox","payload":{"west":-1e300,"south":0,"east":1,"north":1}}`,
+		`{"type":"bbox","payload":{"west":0,"south":0,"east":1,"north":1,"density":1000}}`,
+		`{"type":"bbox","payload":{"west":0,"south":0,"east":1,"north":1,"density":-1}}`,
+		`{"type":"bbox","payload":{"west":1,"south":0,"east":0,"north":1}}`,
+	}
+	for _, in := range bad {
+		t.Run(in, func(t *testing.T) {
+			var loc Location
+			require.Error(t, json.Unmarshal([]byte(in), &loc))
+		})
+	}
+
+	var ok Location
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{"type":"bbox","payload":{"west":5,"south":47,"east":15,"north":55,"density":10}}`), &ok,
+	))
+	assert.Equal(t, 10, ok.Payload.(BboxLocation).Density)
+}
+
+// TestUnmarshalLocation_PolygonVertexCap bounds the point-in-polygon cost of a
+// user-supplied polygon.
+func TestUnmarshalLocation_PolygonVertexCap(t *testing.T) {
+	ring := make([]PointLocation, MaxPolygonVertices+1)
+	raw, err := json.Marshal(map[string]any{
+		"type":    "polygon",
+		"payload": PolygonLocation{Rings: [][]PointLocation{ring}},
+	})
+	require.NoError(t, err)
+	var loc Location
+	err = json.Unmarshal(raw, &loc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vertices")
+}
+
+// TestExpandLocations_NonFiniteRectangleTerminates is the defence in depth for
+// a hand-built Location that never went through a parser: expansion must
+// terminate with a bounded result instead of looping until OOM.
+func TestExpandLocations_NonFiniteRectangleTerminates(t *testing.T) {
+	rects := []RectangleLocation{
+		{
+			SouthWest: PointLocation{Lat: math.Inf(-1), Lon: math.Inf(-1)},
+			NorthEast: PointLocation{Lat: math.Inf(1), Lon: math.Inf(1)},
+		},
+		{SouthWest: PointLocation{Lat: math.NaN(), Lon: 0}, NorthEast: PointLocation{Lat: 1, Lon: 1}},
+		{SouthWest: PointLocation{Lat: -1e300, Lon: -1e300}, NorthEast: PointLocation{Lat: 1e300, Lon: 1e300}},
+		{SouthWest: PointLocation{Lat: -90, Lon: -1e17}, NorthEast: PointLocation{Lat: 90, Lon: 1e17}},
+	}
+	for _, r := range rects {
+		pts := ExpandLocations(Location{Type: LocationTypeRectangle, Payload: r})
+		assert.NotEmpty(t, pts)
+		assert.LessOrEqual(t, len(pts), (maxGridPoints+3)*(maxGridPoints+3))
+	}
+}
+
+// TestSteppedValues_NoProgressIsBounded: at 1e17 adding a step of 1 does not
+// change v, which used to loop forever.
+func TestSteppedValues_NoProgressIsBounded(t *testing.T) {
+	vals := steppedValues(1e17, 2e17, 1)
+	assert.LessOrEqual(t, len(vals), maxGridPoints+3)
+	assert.Equal(t, 2e17, vals[len(vals)-1])
+}
+
+// TestGridPointCount_Saturates: an Inf span used to convert to an
+// implementation-defined int that wrapped to 1 and ended the coarsening loop.
+func TestGridPointCount_Saturates(t *testing.T) {
+	assert.Equal(t, math.MaxInt, gridPointCount(math.Inf(1), 1, 1))
+	assert.Equal(t, math.MaxInt, gridPointCount(math.NaN(), 1, 1))
+	assert.Equal(t, math.MaxInt, gridPointCount(1e17, 1e17, 1))
+}
+
+// TestBboxGridDims covers the non-allocating size check that callers must run
+// before expanding a bbox: bbox:-180,-90,180,90 at density 1000 used to ask
+// make() for ~1 TB and abort the process.
+func TestBboxGridDims(t *testing.T) {
+	world := BboxLocation{West: -180, South: -90, East: 180, North: 90}
+
+	rows, cols, err := BboxGridDims(world, 1, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 181, rows)
+	assert.Equal(t, 361, cols)
+
+	_, _, err = BboxGridDims(world, 100, 0)
+	require.Error(t, err, "648M points must be rejected")
+	assert.Contains(t, err.Error(), "exceeds")
+
+	_, _, err = BboxGridDims(world, 1000, 0)
+	require.Error(t, err)
+	_, _, err = BboxGridDims(world, 0, 0)
+	require.Error(t, err)
+	_, _, err = BboxGridDims(BboxLocation{West: math.Inf(-1), South: 0, East: 1, North: 1}, 1, 0)
+	require.Error(t, err)
+	_, _, err = BboxGridDims(BboxLocation{West: 1, South: 0, East: 0, North: 1}, 1, 0)
+	require.Error(t, err)
+
+	// A caller-supplied limit below the package ceiling applies.
+	_, _, err = BboxGridDims(world, 1, 1000)
+	require.Error(t, err)
+}
+
+func TestExpandBboxToGridChecked(t *testing.T) {
+	pts, rows, cols, err := ExpandBboxToGridChecked(BboxLocation{West: 10, South: 50, East: 11, North: 51}, 2, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 3, rows)
+	assert.Equal(t, 3, cols)
+	assert.Len(t, pts, 9)
+	assert.Equal(t, PointLocation{Lat: 51, Lon: 10}, pts[0])
+
+	pts, _, _, err = ExpandBboxToGridChecked(BboxLocation{West: -180, South: -90, East: 180, North: 90}, 100, 0)
+	require.Error(t, err)
+	assert.Nil(t, pts)
+}
+
+// TestExpandBboxToGrid_ClampsInsteadOfOOM: the deprecated wrapper keeps its
+// signature but never allocates more than MaxBboxGridPoints.
+func TestExpandBboxToGrid_ClampsInsteadOfOOM(t *testing.T) {
+	world := BboxLocation{West: -180, South: -90, East: 180, North: 90}
+	for _, ppd := range []int{100, 1000, 100000} {
+		pts, rows, cols := ExpandBboxToGrid(world, ppd)
+		assert.LessOrEqual(t, len(pts), MaxBboxGridPoints)
+		assert.Equal(t, rows*cols, len(pts), "rows/cols must describe the grid actually produced")
+		assert.Positive(t, len(pts))
+	}
+
+	pts, rows, cols := ExpandBboxToGrid(BboxLocation{West: math.Inf(-1), South: 0, East: math.Inf(1), North: 1}, 10)
+	assert.Empty(t, pts)
+	assert.Zero(t, rows)
+	assert.Zero(t, cols)
+
+	// Small grids are unchanged.
+	pts, rows, cols = ExpandBboxToGrid(BboxLocation{West: 10, South: 50, East: 11, North: 51}, 2)
+	assert.Len(t, pts, 9)
+	assert.Equal(t, 3, rows)
+	assert.Equal(t, 3, cols)
+}
