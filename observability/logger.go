@@ -1,9 +1,7 @@
 package observability
 
 import (
-	"bytes"
 	"fmt"
-	"log"
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -13,11 +11,6 @@ import (
 // verbatim. The Development preset is used for Development and Local stages;
 // the Production preset is used for Production (and is the fallback for
 // unknown stages).
-
-var (
-	bootBuf    bytes.Buffer
-	bootLogger = log.New(&bootBuf, "observability: ", log.Lshortfile)
-)
 
 // NewLogger creates a SugaredLogger for the given stage. The caller owns
 // the returned logger's lifetime; calling Sync() on shutdown is recommended.
@@ -35,8 +28,7 @@ func NewLogger(cfg Config) (*zap.SugaredLogger, error) {
 	}
 
 	if err != nil {
-		bootLogger.Panicln("can't initialize zap logger", "error", err)
-		return nil, err
+		return nil, fmt.Errorf("observability: init zap logger: %w", err)
 	}
 
 	logger := baseLogger.Sugar()

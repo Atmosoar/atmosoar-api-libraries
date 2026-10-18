@@ -176,7 +176,7 @@ func ParseTime(timeStr string) (*TimeRange, error) {
 		return parseTimeRangeSlash(timeStr)
 	}
 
-	// Try parsing as time range (start/end)
+	// Try parsing as a comma-delimited range (start,end).
 	if strings.Contains(timeStr, ",") {
 		return parseTimeRange(timeStr)
 	}
@@ -671,26 +671,22 @@ type TimeShortcut struct {
 func BuildTimeShortcuts(shortcuts map[string]TimeShortcut) map[string]func() time.Time {
 	m := make(map[string]func() time.Time, len(shortcuts))
 	for name, sc := range shortcuts {
-		// capture loop vars
-		nameLocal := name
-		scLocal := sc
-
-		m[nameLocal] = func() time.Time {
+		m[name] = func() time.Time {
 			now := time.Now().UTC()
-			switch scLocal.Type {
+			switch sc.Type {
 			case "now":
 				return FormatTimeDataToRFC3339(now)
 
 			case "offset":
-				if scLocal.Hours == nil {
+				if sc.Hours == nil {
 					// fallback if hours not provided
 					return FormatTimeDataToRFC3339(now)
 				}
 				base := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-				return FormatTimeDataToRFC3339(base.Add(time.Duration(*scLocal.Hours) * time.Hour))
+				return FormatTimeDataToRFC3339(base.Add(time.Duration(*sc.Hours) * time.Hour))
 
 			case "fixed":
-				if t, err := time.Parse(time.RFC3339, scLocal.Value); err == nil {
+				if t, err := time.Parse(time.RFC3339, sc.Value); err == nil {
 					return FormatTimeDataToRFC3339(t.UTC())
 				}
 				// invalid fallback
@@ -744,7 +740,17 @@ func BuildRangeTimeShortcuts(shortcuts map[string]TimeShortcut, log *zap.Sugared
 // FormatTimeDataToRFC3339 does as the name says.
 // BUG-002: on parse error, return the original t unchanged rather than the
 // zero time, so the function never silently produces a zero value.
+//
+// For UTC input (every caller in this package) it truncates to whole seconds
+// directly; the Format/Parse round-trip cost two allocations per shortcut
+// evaluation. Other zones keep the round-trip, because Parse rebuilds the
+// location as Local or a FixedZone and callers may compare Location().
 func FormatTimeDataToRFC3339(t time.Time) time.Time {
+	if t.Location() == time.UTC {
+		if y := t.Year(); y >= 0 && y <= 9999 {
+			return t.Truncate(time.Second)
+		}
+	}
 	formattedTime := t.Format(time.RFC3339)
 	parsed, err := time.Parse(time.RFC3339, formattedTime)
 	if err != nil {
