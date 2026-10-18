@@ -97,6 +97,35 @@ func TestUnmarshalLocation_PolygonVertexCap(t *testing.T) {
 	assert.Contains(t, err.Error(), "vertices")
 }
 
+// TestUnmarshalLocation_PointCountCap keeps a structured polyline or
+// point_list from carrying more points than the query grammar allows, since
+// each point is a downstream upstream lookup.
+func TestUnmarshalLocation_PointCountCap(t *testing.T) {
+	pts := make([]PointLocation, MaxPolylinePoints+1)
+	cases := map[string]any{
+		"polyline":   PolylineLocation{Coordinates: pts},
+		"point_list": PointListLocation{Points: pts},
+	}
+	for typ, payload := range cases {
+		t.Run(typ, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"type": typ, "payload": payload})
+			require.NoError(t, err)
+			var loc Location
+			err = json.Unmarshal(raw, &loc)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "at most")
+		})
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"type":    "polyline",
+		"payload": PolylineLocation{Coordinates: pts[:MaxPolylinePoints]},
+	})
+	require.NoError(t, err)
+	var ok Location
+	require.NoError(t, json.Unmarshal(raw, &ok))
+}
+
 // TestExpandLocations_NonFiniteRectangleTerminates is the defence in depth for
 // a hand-built Location that never went through a parser: expansion must
 // terminate with a bounded result instead of looping until OOM.
