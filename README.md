@@ -118,6 +118,14 @@ This repo publishes semantic Go module versions. Consumers pin to tagged version
   polygon (even-odd rule across all rings, holes excluded), falling back to
   the ring vertices when the polygon is smaller than the grid. Responses for
   country shortcuts change content, so release this as a minor version.
+- **Behaviour change: `claims.RequireAdmin` no longer fails open on the trust
+  switch alone.** With `ATMOSOAR_TRUST_GATEWAY_HEADERS=false` (or a legacy
+  `*_TRUST_GATEWAY_HEADERS=false`), `/admin/<svc>/*` still requires the
+  gateway's `X-Atmosoar-Admin` header unless `ATMOSOAR_INSECURE_ADMIN=true` is
+  set as well. Local docker-compose setups that call admin routes without the
+  gateway need both variables. `FromHeader` and `RequireAdmin` log a WARN at
+  startup naming the env var that disabled enforcement. The legacy per-service
+  trust variables are deprecated; move manifests to the canonical name.
 
 ### v0.5.2
 
