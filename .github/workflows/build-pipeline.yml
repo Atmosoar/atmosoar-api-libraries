@@ -19,10 +19,10 @@ jobs:
     if: github.event_name != 'schedule'  # skip on cron
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Single source of truth for the Go version: go.mod.
           go-version-file: go.mod
@@ -45,10 +45,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Single source of truth for the Go version: go.mod.
           go-version-file: go.mod

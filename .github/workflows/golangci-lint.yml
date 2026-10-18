@@ -16,13 +16,13 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Single source of truth for the Go version: go.mod.
           go-version-file: go.mod
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           # Must be a release built with a Go toolchain >= the `go` directive
           # in go.mod (1.27.2) — v2.11 was built with Go 1.26 and refuses to
