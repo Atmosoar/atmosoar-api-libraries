@@ -52,12 +52,16 @@ func (h *handlers) putConfig(c *gin.Context) {
 	case errors.Is(err, runtimeconfig.ErrImmutable):
 		httputils.SendAPIError(c, h.cfg.Logger, http.StatusConflict,
 			"IMMUTABLE", "config key is not mutable at runtime")
-	default:
+	case errors.Is(err, runtimeconfig.ErrInvalidValue):
 		// Validation failures (bounds/enum/kind) are client errors; surface the
-		// reason. A persistence failure is also reported here as a 400 with the
-		// underlying message — acceptable since the value was not applied.
+		// reason (runtimeconfig redacts the value for Secret keys).
 		httputils.SendAPIError(c, h.cfg.Logger, http.StatusBadRequest,
 			"INVALID_VALUE", err.Error())
+	default:
+		// A persistence failure is not the client's fault, and its text carries
+		// database details (host, user, table). Log it and answer a generic 500
+		// so 5xx alerting sees a store outage.
+		httputils.SendInternalError(c, h.cfg.Logger, err)
 	}
 }
 
@@ -85,8 +89,10 @@ func (h *handlers) getFlags(c *gin.Context) {
 }
 
 // toggleFlagBody is the POST /flags/:flag request body: {"value": <bool>}.
+// Value is a pointer so a missing or misspelled "value" is a 400 instead of
+// binding to false and silently switching the flag off.
 type toggleFlagBody struct {
-	Value bool `json:"value"`
+	Value *bool `json:"value"`
 }
 
 func (h *handlers) toggleFlag(c *gin.Context) {
@@ -96,12 +102,13 @@ func (h *handlers) toggleFlag(c *gin.Context) {
 	}
 	flag := c.Param("flag")
 	var body toggleFlagBody
-	if err := c.ShouldBindJSON(&body); err != nil {
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		httputils.SendAPIError(c, h.cfg.Logger, http.StatusBadRequest,
 			"INVALID_REQUEST", "request body must be {\"value\": <bool>}")
 		return
 	}
-	if err := h.cfg.Flags.Set(c.Request.Context(), flag, body.Value); err != nil {
+	value := *body.Value
+	if err := h.cfg.Flags.Set(c.Request.Context(), flag, value); err != nil {
 		if errors.Is(err, ErrUnknownFlag) {
 			httputils.SendNotFound(c, h.cfg.Logger)
 			return
@@ -109,5 +116,5 @@ func (h *handlers) toggleFlag(c *gin.Context) {
 		httputils.SendInternalError(c, h.cfg.Logger, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "flag": flag, "value": body.Value})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "flag": flag, "value": value})
 }

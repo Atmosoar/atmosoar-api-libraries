@@ -3,6 +3,7 @@ package runtimeconfig
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,11 @@ import (
 
 // ErrImmutable is returned by Apply/Clear for a key whose Mutable flag is false.
 var ErrImmutable = fmt.Errorf("config key is not mutable")
+
+// ErrInvalidValue wraps every validation failure from Apply (wrong type, out
+// of bounds, not in the enum). Errors that do not wrap it are store or
+// internal failures, which the admin API reports as 500, not 400.
+var ErrInvalidValue = errors.New("invalid config value")
 
 // ErrUnknownKey is returned for a name not present in the registry.
 var ErrUnknownKey = fmt.Errorf("unknown config key")

@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -168,5 +170,67 @@ func TestFlags(t *testing.T) {
 		true,
 	); w.Code != http.StatusNotFound {
 		t.Fatalf("toggle unknown: want 404 got %d", w.Code)
+	}
+}
+
+// TestToggleFlagRequiresValue: a body without "value" used to bind to false
+// and switch the flag off with a 200.
+func TestToggleFlagRequiresValue(t *testing.T) {
+	fs := NewFlagSet(runtimeconfig.NewMemStore(), zap.NewNop().Sugar(),
+		[]Flag{{Name: "nowcast_enabled", Default: true}})
+	r := setupEngine(t, fs)
+	for _, body := range []string{`{}`, `{"enabled":true}`, `{"value":null}`} {
+		w := do(r, http.MethodPost, "/admin/test/flags/nowcast_enabled", body, true)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: want 400, got %d", body, w.Code)
+		}
+		if !fs.Enabled("nowcast_enabled") {
+			t.Fatalf("body %s switched the flag off", body)
+		}
+	}
+	w := do(r, http.MethodPost, "/admin/test/flags/nowcast_enabled", `{"value":false}`, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("explicit false: want 200, got %d", w.Code)
+	}
+	if fs.Enabled("nowcast_enabled") {
+		t.Fatal("explicit false did not switch the flag off")
+	}
+}
+
+// brokenStore stands in for an unreachable Postgres.
+type brokenStore struct{ *runtimeconfig.MemStore }
+
+func (brokenStore) Upsert(context.Context, string, json.RawMessage) error {
+	return errors.New("runtime_config upsert: failed to connect to `host=db.internal user=svc`")
+}
+
+// TestPutConfigStoreFailureIs500: a store outage is a 500 with a generic
+// message, not a 400 that echoes the database error to the client.
+func TestPutConfigStoreFailureIs500(t *testing.T) {
+	t.Setenv(claims.EnvTrustHeaders, "true")
+	reg := runtimeconfig.NewRegistry().
+		Register(runtimeconfig.Key{Name: "max_results", Kind: runtimeconfig.KindInt,
+			Default: 5000, Mutable: true, Bounds: runtimeconfig.FloatBounds(1, 100000)})
+	m := runtimeconfig.NewManager(reg, brokenStore{runtimeconfig.NewMemStore()}, zap.NewNop().Sugar())
+	r := gin.New()
+	Register(r, Config{
+		Prefix:   "/admin/test",
+		Service:  "test",
+		Manager:  m,
+		Logger:   zap.NewNop().Sugar(),
+		BootTime: time.Now(),
+	})
+
+	w := do(r, http.MethodPut, "/admin/test/config/max_results", `{"value": 10}`, true)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("store failure: want 500, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "db.internal") {
+		t.Fatalf("store error leaked to client: %s", w.Body.String())
+	}
+	// A validation failure is still a 400 with the reason.
+	w = do(r, http.MethodPut, "/admin/test/config/max_results", `{"value": 999999}`, true)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "INVALID_VALUE") {
+		t.Fatalf("invalid value: want 400 INVALID_VALUE, got %d body=%s", w.Code, w.Body.String())
 	}
 }
