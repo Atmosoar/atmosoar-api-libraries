@@ -42,8 +42,12 @@ type FlagSet struct {
 }
 
 // NewFlagSet builds a flag set over store with the given known flags. Pass a
-// runtimeconfig.MemStore for ephemeral flags or a pgxstore for durable ones (the
-// store should be dedicated to flags, e.g. a feature_flags table).
+// runtimeconfig.MemStore for ephemeral flags, or for durable ones a pgxstore on
+// a table of its own: pgxstore.NewWithTable(pool, "feature_flags") with
+// pgxstore.EnsureSchemaFor or CreateTableSQLFor. Do not pass pgxstore.New(pool)
+// when the runtimeconfig Manager uses it too: both would share runtime_config,
+// the Manager would drop every flag row at boot as an unknown key, and a flag
+// and a config key with the same name would overwrite each other.
 func NewFlagSet(store runtimeconfig.Store, logger *zap.SugaredLogger, known []Flag) *FlagSet {
 	byName := make(map[string]Flag, len(known))
 	for _, f := range known {
