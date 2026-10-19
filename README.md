@@ -160,6 +160,10 @@ This repo publishes semantic Go module versions. Consumers pin to tagged version
   release the in-flight gauge, count the request as a 500 and end the span
   (status Error) before re-panicking. `NewLogger` returns the zap build error
   instead of panicking.
+- **pgx stays on v5.10.x.** pgx v5.11.0 added `TypeMap()` to the `pgx.Rows`
+  interface, and pgxmock v4.9.0 (latest) does not implement it, so a consumer
+  that tests with pgxmock fails `go vet`/`go test` once this module forces
+  v5.11. Move to v5.11 only after pgxmock ships a release with `TypeMap`.
 - **Go 1.27.2 required.** The `go` directive moved from 1.25.13 to 1.27.2, so
   consumers need a Go 1.27.2 toolchain and a golangci-lint release built with
   Go 1.27 (CI here uses v2.15) to build and lint against this version.
