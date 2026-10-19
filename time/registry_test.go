@@ -85,3 +85,35 @@ func TestFormatTimeDataToRFC3339_FallbackOnError(t *testing.T) {
 	assert.Equal(t, want, got)
 	assert.False(t, got.IsZero(), "must never silently return the zero time")
 }
+
+// roundTripRFC3339 is the original FormatTimeDataToRFC3339 body, kept as the
+// reference the UTC fast path must match exactly.
+func roundTripRFC3339(t time.Time) time.Time {
+	parsed, err := time.Parse(time.RFC3339, t.Format(time.RFC3339))
+	if err != nil {
+		return t
+	}
+	return parsed
+}
+
+// TestFormatTimeDataToRFC3339_MatchesRoundTrip pins the truncate fast path to
+// the old Format/Parse output, value and Location, for UTC and other zones.
+func TestFormatTimeDataToRFC3339_MatchesRoundTrip(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	inputs := []time.Time{
+		time.Now().UTC(),
+		time.Date(2026, 4, 19, 12, 34, 56, 999999999, time.UTC),
+		time.Date(1969, 12, 31, 23, 59, 59, 500000000, time.UTC),
+		time.Date(10000, 1, 1, 0, 0, 0, 5, time.UTC),
+		time.Date(2026, 4, 19, 12, 34, 56, 789, berlin),
+		time.Date(2026, 4, 19, 12, 34, 56, 789, time.FixedZone("x", -3*3600)),
+	}
+	for _, in := range inputs {
+		got, want := FormatTimeDataToRFC3339(in), roundTripRFC3339(in)
+		assert.True(t, got.Equal(want), "%v: got %v, want %v", in, got, want)
+		assert.Equal(t, want.Location().String(), got.Location().String(), "%v: location", in)
+	}
+}

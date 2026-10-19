@@ -15,6 +15,7 @@ branch="${GITHUB_REF_NAME:-unknown}"
 echo -e "${BLUE}=== Vulnerability Policy Enforcement for branch: ${branch} ===${RESET}"
 echo -e "govulncheck rc: ${CYAN}${GV_RC}${RESET}"
 echo -e "OSV any: ${CYAN}${OSV_ANY}${RESET}, high: ${CYAN}${OSV_HIGH}${RESET}, crit: ${CYAN}${OSV_CRIT}${RESET}"
+echo -e "OSV scanner error: ${CYAN}${OSV_ERR:-1}${RESET}"
 
 hard_fail() {
   echo -e "\n${RED}============================================================${RESET}"
@@ -28,6 +29,12 @@ soft_note() {
   echo -e "${YELLOW}  ⚠  Vulnerabilities found — soft fail (see scan logs)      ${RESET}"
   echo -e "${YELLOW}------------------------------------------------------------${RESET}\n"
 }
+
+# A scan that did not complete proves nothing: fail closed on every branch.
+if [[ "${OSV_ERR:-1}" != "0" ]]; then
+  echo -e "${RED}OSV-Scanner did not produce a usable report.${RESET}"
+  hard_fail
+fi
 
 if [[ "${branch}" == "main" || "${branch}" == "master" ]]; then
   # release branch: ANY severity from either tool => hard fail

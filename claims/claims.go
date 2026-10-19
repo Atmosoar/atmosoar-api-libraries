@@ -39,18 +39,38 @@ var legacyTrustEnvVars = []string{
 	"ELEVATION_TRUST_GATEWAY_HEADERS",
 }
 
+// EnvInsecureAdmin is the second, explicit opt-in that lets RequireAdmin pass
+// requests through while trust enforcement is off. Disabling trust alone no
+// longer opens /admin/*: a dev value of ATMOSOAR_TRUST_GATEWAY_HEADERS=false (or
+// a leftover legacy var) copied into a deployed manifest would otherwise make
+// every config PUT and flag toggle unauthenticated.
+const EnvInsecureAdmin = "ATMOSOAR_INSECURE_ADMIN"
+
 // TrustEnabled reports whether trust-header enforcement is on. EnvTrustHeaders
 // takes precedence; otherwise the first set legacy var decides; default true.
 func TrustEnabled() bool {
+	enabled, _ := trustSource()
+	return enabled
+}
+
+// trustSource is TrustEnabled plus the name of the env var that decided it
+// (empty when the default applied), so the middlewares can say which variable
+// switched enforcement off.
+func trustSource() (bool, string) {
 	if v, ok := os.LookupEnv(EnvTrustHeaders); ok {
-		return !strings.EqualFold(v, "false")
+		return !strings.EqualFold(v, "false"), EnvTrustHeaders
 	}
 	for _, k := range legacyTrustEnvVars {
 		if v, ok := os.LookupEnv(k); ok {
-			return !strings.EqualFold(v, "false")
+			return !strings.EqualFold(v, "false"), k
 		}
 	}
-	return true
+	return true, ""
+}
+
+// insecureAdminEnabled reports whether EnvInsecureAdmin is set to "true".
+func insecureAdminEnabled() bool {
+	return strings.EqualFold(os.Getenv(EnvInsecureAdmin), "true")
 }
 
 // propagateLogger receives the one-shot warning emitted by PropagateTrustHeaders
@@ -151,9 +171,14 @@ func PropagateTrustHeaders(ctx context.Context, req *http.Request) {
 //     the gateway, or the gateway misconfigured itself);
 //   - unrecognized identity-version -> 500 INTERNAL_ERROR (gateway/backend on
 //     mismatched contract versions; roll both);
-//   - trust disabled (see TrustEnabled) -> no-op pass-through for local dev.
+//   - trust disabled (see TrustEnabled) -> no-op pass-through for local dev, with
+//     a WARN at construction naming the env var that disabled it.
 func FromHeader(logger *zap.SugaredLogger) gin.HandlerFunc {
-	trust := TrustEnabled()
+	trust, source := trustSource()
+	if !trust {
+		logger.Warnw("gateway trust-header enforcement is DISABLED; identity headers are not checked (local dev only)",
+			"env", source)
+	}
 
 	return func(c *gin.Context) {
 		c.Request = c.Request.WithContext(
@@ -200,13 +225,36 @@ func FromHeader(logger *zap.SugaredLogger) gin.HandlerFunc {
 // RequireAdmin returns Gin middleware that rejects requests lacking the
 // gateway-stamped HeaderAdmin: AdminHeaderValue. It must run AFTER FromHeader. The
 // gateway stamps the header only for api:admin callers and strips any client copy
-// at the trust boundary, so its presence is a trustworthy admin signal. When trust
-// enforcement is disabled (local dev) this is a pass-through, mirroring FromHeader.
+// at the trust boundary, so its presence is a trustworthy admin signal.
+//
+// Disabling trust enforcement (see TrustEnabled) does NOT disable this check on
+// its own: the admin header is still required unless EnvInsecureAdmin=true is set
+// as well. That keeps a stray dev trust switch from opening every admin route. In
+// local dev without the gateway, either set both variables or send the header.
 func RequireAdmin(logger *zap.SugaredLogger) gin.HandlerFunc {
-	trust := TrustEnabled()
+	trust, source := trustSource()
+	passThrough := !trust && insecureAdminEnabled()
+	switch {
+	case passThrough:
+		logger.Warnw(
+			"admin routes are UNAUTHENTICATED: trust enforcement is off and the insecure-admin opt-in is set (local dev only)",
+			"env",
+			source,
+			"opt_in",
+			EnvInsecureAdmin,
+		)
+	case !trust:
+		logger.Warnw(
+			"trust enforcement is off but admin routes still require the gateway admin header; set the opt-in to bypass in local dev",
+			"env",
+			source,
+			"opt_in",
+			EnvInsecureAdmin,
+		)
+	}
 
 	return func(c *gin.Context) {
-		if !trust {
+		if passThrough {
 			c.Next()
 			return
 		}

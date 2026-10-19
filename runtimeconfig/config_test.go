@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,6 +105,57 @@ func TestValidationRejects(t *testing.T) {
 	}
 }
 
+// failingStore stands in for an unreachable Postgres: every write fails.
+type failingStore struct{ *MemStore }
+
+func (failingStore) Upsert(context.Context, string, json.RawMessage) error {
+	return errors.New("runtime_config upsert: failed to connect to host=db user=svc")
+}
+
+// TestApplyErrorClassification lets the admin API tell a rejected value (400)
+// from a store failure (500): only validation errors wrap ErrInvalidValue.
+func TestApplyErrorClassification(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	for key, raw := range map[string]string{
+		"max_results":      `200000`,
+		"log_level":        `"trace"`,
+		"fetch_on_startup": `"yes"`,
+		"nogo_dbz":         `"x"`,
+	} {
+		if err := m.Apply(ctx, key, json.RawMessage(raw)); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("%s=%s: want ErrInvalidValue, got %v", key, raw, err)
+		}
+	}
+
+	broken := NewManager(testRegistry(), failingStore{MemStore: NewMemStore()}, zap.NewNop().Sugar())
+	err := broken.Apply(ctx, "max_results", json.RawMessage(`10`))
+	if err == nil || errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("store failure must not be classified as invalid value, got %v", err)
+	}
+}
+
+// TestValidationRedactsSecretValue keeps a rejected secret out of the error
+// message the admin API returns.
+func TestValidationRedactsSecretValue(t *testing.T) {
+	reg := NewRegistry().
+		Register(Key{Name: "api_mode", Kind: KindEnum, Default: "a", Mutable: true,
+			Enum: []string{"a", "b"}, Secret: true}).
+		Register(Key{Name: "pin", Kind: KindInt, Default: 1, Mutable: true,
+			Bounds: FloatBounds(0, 10), Secret: true})
+	m := NewManager(reg, NewMemStore(), zap.NewNop().Sugar())
+	ctx := context.Background()
+	for key, raw := range map[string]string{"api_mode": `"hunter2"`, "pin": `987654`} {
+		err := m.Apply(ctx, key, json.RawMessage(raw))
+		if !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("%s: want ErrInvalidValue, got %v", key, err)
+		}
+		if msg := err.Error(); strings.Contains(msg, "hunter2") || strings.Contains(msg, "987654") {
+			t.Fatalf("%s: secret value echoed in %q", key, msg)
+		}
+	}
+}
+
 func TestImmutableAndUnknown(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
@@ -183,4 +237,39 @@ func TestConcurrentReadDuringSwap(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// yieldingStore widens the window between persist and publish so concurrent
+// writers would interleave their load-clone-store without Manager.writeMu.
+type yieldingStore struct{ *MemStore }
+
+func (s yieldingStore) Upsert(ctx context.Context, key string, value json.RawMessage) error {
+	runtime.Gosched()
+	return s.MemStore.Upsert(ctx, key, value)
+}
+
+func TestConcurrentApplyKeepsEveryKey(t *testing.T) {
+	const n = 100
+	reg := NewRegistry()
+	for i := 0; i < n; i++ {
+		reg.Register(Key{Name: fmt.Sprintf("k%03d", i), Kind: KindInt, Default: 0, Mutable: true})
+	}
+	m := NewManager(reg, yieldingStore{NewMemStore()}, zap.NewNop().Sugar())
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := m.Apply(ctx, fmt.Sprintf("k%03d", i), json.RawMessage(`7`)); err != nil {
+				t.Errorf("Apply k%03d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if key := fmt.Sprintf("k%03d", i); m.Int(key) != 7 {
+			t.Fatalf("%s lost its concurrent override", key)
+		}
+	}
 }

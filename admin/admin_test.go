@@ -1,11 +1,16 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,5 +173,186 @@ func TestFlags(t *testing.T) {
 		true,
 	); w.Code != http.StatusNotFound {
 		t.Fatalf("toggle unknown: want 404 got %d", w.Code)
+	}
+}
+
+// TestToggleFlagRequiresValue: a body without "value" used to bind to false
+// and switch the flag off with a 200.
+func TestToggleFlagRequiresValue(t *testing.T) {
+	fs := NewFlagSet(runtimeconfig.NewMemStore(), zap.NewNop().Sugar(),
+		[]Flag{{Name: "nowcast_enabled", Default: true}})
+	r := setupEngine(t, fs)
+	for _, body := range []string{`{}`, `{"enabled":true}`, `{"value":null}`} {
+		w := do(r, http.MethodPost, "/admin/test/flags/nowcast_enabled", body, true)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: want 400, got %d", body, w.Code)
+		}
+		if !fs.Enabled("nowcast_enabled") {
+			t.Fatalf("body %s switched the flag off", body)
+		}
+	}
+	w := do(r, http.MethodPost, "/admin/test/flags/nowcast_enabled", `{"value":false}`, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("explicit false: want 200, got %d", w.Code)
+	}
+	if fs.Enabled("nowcast_enabled") {
+		t.Fatal("explicit false did not switch the flag off")
+	}
+}
+
+// brokenStore stands in for an unreachable Postgres.
+type brokenStore struct{ *runtimeconfig.MemStore }
+
+func (brokenStore) Upsert(context.Context, string, json.RawMessage) error {
+	return errors.New("runtime_config upsert: failed to connect to `host=db.internal user=svc`")
+}
+
+// TestPutConfigStoreFailureIs500: a store outage is a 500 with a generic
+// message, not a 400 that echoes the database error to the client.
+func TestPutConfigStoreFailureIs500(t *testing.T) {
+	t.Setenv(claims.EnvTrustHeaders, "true")
+	reg := runtimeconfig.NewRegistry().
+		Register(runtimeconfig.Key{Name: "max_results", Kind: runtimeconfig.KindInt,
+			Default: 5000, Mutable: true, Bounds: runtimeconfig.FloatBounds(1, 100000)})
+	m := runtimeconfig.NewManager(reg, brokenStore{runtimeconfig.NewMemStore()}, zap.NewNop().Sugar())
+	r := gin.New()
+	Register(r, Config{
+		Prefix:   "/admin/test",
+		Service:  "test",
+		Manager:  m,
+		Logger:   zap.NewNop().Sugar(),
+		BootTime: time.Now(),
+	})
+
+	w := do(r, http.MethodPut, "/admin/test/config/max_results", `{"value": 10}`, true)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("store failure: want 500, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "db.internal") {
+		t.Fatalf("store error leaked to client: %s", w.Body.String())
+	}
+	// A validation failure is still a 400 with the reason.
+	w = do(r, http.MethodPut, "/admin/test/config/max_results", `{"value": 999999}`, true)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "INVALID_VALUE") {
+		t.Fatalf("invalid value: want 400 INVALID_VALUE, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// yieldingStore widens the window between persist and publish so concurrent
+// toggles would interleave their copy-and-store without FlagSet.writeMu.
+type yieldingStore struct{ *runtimeconfig.MemStore }
+
+func (s yieldingStore) Upsert(ctx context.Context, key string, value json.RawMessage) error {
+	runtime.Gosched()
+	return s.MemStore.Upsert(ctx, key, value)
+}
+
+func TestConcurrentFlagSetKeepsEveryFlag(t *testing.T) {
+	const n = 100
+	known := make([]Flag, n)
+	for i := range known {
+		known[i] = Flag{Name: fmt.Sprintf("f%03d", i)}
+	}
+	fs := NewFlagSet(yieldingStore{runtimeconfig.NewMemStore()}, zap.NewNop().Sugar(), known)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for _, fl := range known {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := fs.Set(ctx, name, true); err != nil {
+				t.Errorf("Set %s: %v", name, err)
+			}
+		}(fl.Name)
+	}
+	wg.Wait()
+	for _, v := range fs.Snapshot() {
+		if !v.Value {
+			t.Fatalf("%s lost its concurrent toggle", v.Name)
+		}
+	}
+}
+
+// downStore fails every operation.
+type downStore struct{}
+
+func (downStore) LoadAll(context.Context) (map[string]json.RawMessage, error) {
+	return nil, errors.New("down")
+}
+func (downStore) Upsert(context.Context, string, json.RawMessage) error { return errors.New("down") }
+func (downStore) Delete(context.Context, string) error                  { return errors.New("down") }
+func (downStore) Kind() string                                          { return "down" }
+
+func TestFlagSetLoadAtBoot(t *testing.T) {
+	ctx := context.Background()
+	known := []Flag{{Name: "a", Default: false}, {Name: "b", Default: true}, {Name: "c", Default: true}}
+
+	store := runtimeconfig.NewMemStore()
+	_ = store.Upsert(ctx, "a", json.RawMessage(`true`))
+	_ = store.Upsert(ctx, "b", json.RawMessage(`"off"`)) // invalid: keeps default
+	_ = store.Upsert(ctx, "zz", json.RawMessage(`true`)) // undeclared: ignored
+	fs := NewFlagSet(store, zap.NewNop().Sugar(), known)
+	if err := fs.LoadAtBoot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Enabled("a") || !fs.Enabled("b") || !fs.Enabled("c") || fs.Enabled("zz") {
+		t.Fatalf("unexpected snapshot: %+v", fs.Snapshot())
+	}
+
+	down := NewFlagSet(downStore{}, zap.NewNop().Sugar(), known)
+	if err := down.LoadAtBoot(ctx); err != nil {
+		t.Fatalf("a store error at boot must not fail startup: %v", err)
+	}
+	if down.Enabled("a") || !down.Enabled("b") {
+		t.Fatal("store error must leave the declared defaults")
+	}
+	if err := down.Set(ctx, "a", true); err == nil || down.Enabled("a") {
+		t.Fatal("a failed persist must not flip the live flag")
+	}
+}
+
+func TestDeleteConfigAndFlagErrors(t *testing.T) {
+	r := setupEngine(t, nil)
+	if w := do(r, http.MethodDelete, "/admin/test/config/nope", "", true); w.Code != http.StatusNotFound {
+		t.Fatalf("delete unknown: want 404 got %d", w.Code)
+	}
+	if w := do(r, http.MethodDelete, "/admin/test/config/dem_mode", "", true); w.Code != http.StatusConflict {
+		t.Fatalf("delete immutable: want 409 got %d", w.Code)
+	}
+
+	t.Setenv(claims.EnvTrustHeaders, "true")
+	reg := runtimeconfig.NewRegistry().
+		Register(runtimeconfig.Key{Name: "max_results", Kind: runtimeconfig.KindInt, Default: 1, Mutable: true})
+	fs := NewFlagSet(downStore{}, zap.NewNop().Sugar(), []Flag{{Name: "kill", Description: "d"}})
+	broken := gin.New()
+	Register(broken, Config{
+		Prefix:   "/admin/test",
+		Service:  "test",
+		Manager:  runtimeconfig.NewManager(reg, downStore{}, zap.NewNop().Sugar()),
+		Flags:    fs,
+		Logger:   zap.NewNop().Sugar(),
+		BootTime: time.Now(),
+	})
+	if w := do(
+		broken,
+		http.MethodDelete,
+		"/admin/test/config/max_results",
+		"",
+		true,
+	); w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete on a down store: want 500 got %d", w.Code)
+	}
+	if w := do(
+		broken,
+		http.MethodPost,
+		"/admin/test/flags/kill",
+		`{"value":true}`,
+		true,
+	); w.Code != http.StatusInternalServerError {
+		t.Fatalf("toggle on a down store: want 500 got %d", w.Code)
+	}
+	w := do(broken, http.MethodGet, "/admin/test/flags", "", true)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"kill"`) {
+		t.Fatalf("get flags: %d %s", w.Code, w.Body.String())
 	}
 }

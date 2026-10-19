@@ -2,6 +2,7 @@ package observability
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel"
@@ -91,21 +92,35 @@ func TracingMiddleware(skipPaths []string, opts ...TracingOption) gin.HandlerFun
 		// can access it.
 		c.Request = c.Request.WithContext(ctx)
 
-		span.SetAttributes(
-			attribute.String("http.method", c.Request.Method),
-			attribute.String("http.route", route),
-			attribute.String("http.url", RedactURLWithPath(c.Request.URL, cfg.pathRedactor)),
-		)
+		// End the span in a defer so a panicking handler still exports it,
+		// marked Error, before the panic continues to the recovery middleware.
+		defer func() {
+			rec := recover()
+			status := c.Writer.Status()
+			if rec != nil {
+				status = http.StatusInternalServerError
+				span.SetStatus(codes.Error, fmt.Sprintf("panic: %v", rec))
+			} else if status >= 500 {
+				span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
+			}
+			span.SetAttributes(attribute.Int("http.status_code", status))
+			span.End()
 
-		c.Next()
+			if rec != nil {
+				panic(rec)
+			}
+		}()
 
-		status := c.Writer.Status()
-		span.SetAttributes(attribute.Int("http.status_code", status))
-
-		if status >= 500 {
-			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
+		// Skip the URL redaction (query parse + re-encode) when the span is not
+		// sampled or the provider is the no-op one.
+		if span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("http.method", c.Request.Method),
+				attribute.String("http.route", route),
+				attribute.String("http.url", RedactURLWithPath(c.Request.URL, cfg.pathRedactor)),
+			)
 		}
 
-		span.End()
+		c.Next()
 	}
 }

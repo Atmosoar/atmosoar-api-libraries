@@ -1,10 +1,13 @@
 name: Go
 
 on:
+  # Feature work merges into develop through PRs, so CI has to run there too,
+  # not only when develop is promoted to master. enforce_policy.sh keeps the
+  # hard vulnerability gate for master and a soft note on other branches.
   push:
-    branches: [ "master", "main" ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: [ "master", "develop" ]
   schedule:
     - cron: "00 02 * * *"   # nightly at 02:00 UTC
 
@@ -16,10 +19,10 @@ jobs:
     if: github.event_name != 'schedule'  # skip on cron
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Single source of truth for the Go version: go.mod.
           go-version-file: go.mod
@@ -42,10 +45,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Single source of truth for the Go version: go.mod.
           go-version-file: go.mod
