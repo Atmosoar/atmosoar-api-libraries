@@ -5,7 +5,7 @@ go 1.27.2
 require (
 	github.com/fogleman/gg v1.3.0
 	github.com/gin-gonic/gin v1.12.0
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/stretchr/testify v1.12.1
