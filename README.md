@@ -114,7 +114,7 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
 
-### Unreleased
+### v0.7.0
 
 - **`location` validates coordinates.** Every parser and the structured JSON
   payload path reject NaN, ±Inf, latitudes outside [-90, 90] and longitudes
