@@ -1,0 +1,32 @@
+# Weekly dependency PRs against develop. The library has no private
+# dependencies of its own, so no registry credentials are needed here.
+version: 2
+updates:
+  # Keeps the workflow actions on current releases; all bumps in one PR.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Go modules of the library. The OpenTelemetry modules are released in
+  # lockstep and must move together, so they get their own group; every other
+  # minor/patch bump is grouped, majors arrive one per PR.
+  - package-ecosystem: gomod
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      otel:
+        patterns: ["go.opentelemetry.io/*"]
+      go-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # pgx is held at v5.10.0 until pgxmock supports v5.11; drop this entry
+      # once it does.
+      - dependency-name: github.com/jackc/pgx/v5
+        versions: [">= 5.11.0"]
