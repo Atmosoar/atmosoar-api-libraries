@@ -43,6 +43,13 @@ type Config struct {
 	// "localhost:4317" when empty. Any http:// or https:// prefix is stripped.
 	OTLPEndpoint string
 
+	// OTLPTLS exports spans over TLS, verified against the system roots,
+	// instead of plaintext gRPC. The zero value keeps the plaintext exporter
+	// every consumer used up to v0.7.0, so collectors without TLS keep
+	// receiving spans after a library bump. An https:// prefix on OTLPEndpoint
+	// does not switch TLS on by itself; it is stripped like http://.
+	OTLPTLS bool
+
 	// MetricsSkipPath is the request path the HTTP metrics middleware excludes
 	// from self-instrumentation (prevents /metrics endpoint self-inflation).
 	// Defaults to "/metrics" when empty.
@@ -58,6 +65,9 @@ type Config struct {
 // OTEL_EXPORTER_OTLP_ENDPOINT. Consumers that use a different config source
 // can construct Config directly.
 //
+// OTEL_EXPORTER_OTLP_INSECURE=false (the standard OTel variable) sets OTLPTLS.
+// Any other value, or none, keeps the plaintext exporter.
+//
 // The caller must provide the app stage (e.g. from their own config loader)
 // and the metrics / trace skip paths (they're service-specific).
 func ConfigFromEnv(stage AppStage, metricsSkipPath string, traceSkipPaths []string) Config {
@@ -67,6 +77,7 @@ func ConfigFromEnv(stage AppStage, metricsSkipPath string, traceSkipPaths []stri
 		ServiceName:     os.Getenv("OTEL_SERVICE_NAME"),
 		TracingEnabled:  enabled,
 		OTLPEndpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTLPTLS:         strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")), "false"),
 		MetricsSkipPath: metricsSkipPath,
 		TraceSkipPaths:  traceSkipPaths,
 	}

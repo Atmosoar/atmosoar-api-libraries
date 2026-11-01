@@ -106,6 +106,10 @@ func MetricsHandler() gin.HandlerFunc {
 // The skipPath argument is the path to exclude from metric recording (the
 // metrics scrape endpoint itself, to prevent self-inflation). When empty
 // it defaults to "/metrics".
+//
+// The path label is Gin's route template. A request that matched no Gin route
+// is labelled with the template stored by WithRouteTemplate, if the handler
+// set one, and "/unknown" otherwise.
 func HTTPMetricsMiddleware(skipPath string) gin.HandlerFunc {
 	if skipPath == "" {
 		skipPath = "/metrics"
@@ -128,10 +132,15 @@ func HTTPMetricsMiddleware(skipPath string) gin.HandlerFunc {
 			elapsed := time.Since(start).Seconds()
 
 			// Use Gin route template for low-cardinality labels; fall back to
-			// /unknown for requests that didn't match any registered route.
+			// the template a self-routing handler stored with WithRouteTemplate,
+			// then to /unknown for requests that didn't match any route.
 			path := c.FullPath()
 			if path == "" {
-				path = "/unknown"
+				if template, ok := RouteTemplate(c.Request.Context()); ok {
+					path = template
+				} else {
+					path = "/unknown"
+				}
 			}
 
 			code := c.Writer.Status()

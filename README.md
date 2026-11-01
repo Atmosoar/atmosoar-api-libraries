@@ -114,6 +114,26 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
 
+### Unreleased (next: v0.8.0)
+
+- **`observability` route templates for self-routed requests (ATMO-367).**
+  `WithRouteTemplate(ctx, template)` / `RouteTemplate(ctx)` carry the route a
+  handler matched by itself, e.g. the gateway's NoRoute dispatcher.
+  `HTTPMetricsMiddleware` labels such a request with that template instead of
+  `/unknown`. Opt-in: nothing changes for a service that never calls it, and a
+  Gin-matched route keeps `FullPath`. The template is a label value, so pass
+  one from a fixed route table, never the raw path.
+- **`observability` can export spans over TLS (ATMO-368).** `Config.OTLPTLS`
+  switches the OTLP gRPC exporter to TLS 1.2+ against the system roots;
+  `ConfigFromEnv` sets it when `OTEL_EXPORTER_OTLP_INSECURE=false`. The zero
+  value keeps the plaintext exporter, so a collector without TLS (today's
+  `observability.atmosoar.io:4317`) keeps receiving spans after the bump. An
+  `https://` endpoint prefix is still stripped and does not enable TLS on its
+  own. Headers such as a bearer token come from the exporter's own
+  `OTEL_EXPORTER_OTLP_HEADERS`.
+- **Go 1.27.3 required** (GO-2026-6809). `google.golang.org/grpc` is now a
+  direct dependency (same version as before).
+
 ### v0.7.0
 
 - **`location` validates coordinates.** Every parser and the structured JSON
