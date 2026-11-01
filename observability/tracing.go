@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"crypto/tls"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/credentials"
 )
 
 // ShutdownFunc flushes pending spans and closes the exporter. A no-op
@@ -27,6 +29,7 @@ type ShutdownFunc func(context.Context) error
 //   - Endpoint defaults to "localhost:4317" when empty; http:// / https:// prefix is stripped.
 //   - Service name defaults to "dev-atmosoar-api" when empty.
 //   - Exporter construction has a 5-second timeout.
+//   - Transport is plaintext gRPC unless cfg.OTLPTLS is set (TLS 1.2+, system roots).
 //   - On exporter error the library logs a warning and returns a no-op (does not crash).
 //   - Sampler is AlwaysSample (collector handles reduction).
 //   - W3C traceparent propagation is installed globally.
@@ -54,9 +57,14 @@ func InitTracing(cfg Config, logger *zap.SugaredLogger) ShutdownFunc {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	transport := otlptracegrpc.WithInsecure()
+	if cfg.OTLPTLS {
+		transport = otlptracegrpc.WithTLSCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+	}
+
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
+		transport,
 	)
 	if err != nil {
 		if logger != nil {
@@ -80,7 +88,7 @@ func InitTracing(cfg Config, logger *zap.SugaredLogger) ShutdownFunc {
 
 	if logger != nil {
 		logger.Infow("OpenTelemetry tracing enabled",
-			"endpoint", endpoint, "service", serviceName, "sampler", "AlwaysOn")
+			"endpoint", endpoint, "tls", cfg.OTLPTLS, "service", serviceName, "sampler", "AlwaysOn")
 	}
 
 	return ShutdownFunc(tp.Shutdown)

@@ -1,6 +1,6 @@
 module atmosoar.io/atmosoar-api-libraries
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/fogleman/gg v1.3.0
@@ -16,6 +16,7 @@ require (
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/image v0.47.0
+	google.golang.org/grpc v1.84.0
 )
 
 require (
@@ -70,6 +71,5 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261012220534-4341edf3f941 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941 // indirect
-	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
