@@ -6,7 +6,7 @@ Shared Go libraries for Atmosoar services. A single Go module containing ten pac
 
 | Package | Purpose |
 |---|---|
-| `location` | Parse location query parameters (point, polyline, rectangle, bbox, polygon, WMO station, country shortcut) into typed values. |
+| `location` | Parse location query parameters (point, multi-point set, polyline, rectangle, bbox, polygon, WMO station, country shortcut) into typed values. |
 | `time` | Parse time query parameters (single time, range with resolution, list, named shortcut) into typed values. |
 | `shapefile` | Embedded Natural Earth 1:110m country polygon lookup by name or ISO code. Used internally by `location`, also importable on its own. |
 | `observability` | Zap logger, Prometheus HTTP metrics middleware and OTel tracing. FX services import `observability.Module`; non-FX consumers call `ConfigFromEnv`, `NewLogger`, `InitTracing`, `RegisterDefaultCollectors`, `HTTPMetricsMiddleware`, `TracingMiddleware` and `MetricsHandler` directly. `RedactURL`/`RedactURLWithPath`, `WithPathRedactor` and `StartSpan` (non-HTTP spans) were added in v0.5.0. |
@@ -114,7 +114,22 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
 
-### Unreleased (next: v0.8.0)
+### Unreleased (next: v0.9.0)
+
+- **`location` parses a set of independent points (ATMO-405).** New
+  `LocationTypeMultiPoint` (`"multi_point"`) with payload
+  `MultiPointLocation{Points}`, from the query form
+  `points:lat,lon|lat,lon|...` (`;` also separates points, the prefix is
+  case-insensitive) or the v2 body `{"type":"multi_point","payload":{"points":[...]}}`.
+  It takes 1 to `MaxMultiPoints` (100) lat,lon pairs, each validated like a
+  point; an empty list or one over the cap is rejected with an error naming
+  the cap. The point count never changes the type: two points in NE/SW order
+  stay two points, not a rectangle. Points keep request order and are not
+  deduplicated. `ExpandLocations` returns them as-is. The bare
+  `lat,lon|lat,lon|...` forms are unchanged (two points NE/SW → rectangle,
+  otherwise → polyline), as is `point_list`.
+
+### v0.8.0
 
 - **`observability` route templates for self-routed requests (ATMO-367).**
   `WithRouteTemplate(ctx, template)` / `RouteTemplate(ctx)` carry the route a
