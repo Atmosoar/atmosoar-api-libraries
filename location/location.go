@@ -1,7 +1,7 @@
 // Package location provides parsers and expansion helpers for location query
-// parameters used by Atmosoar services (points, polylines, rectangles,
-// bounding boxes, polygons, WMO station shortcuts, and named country
-// shortcuts).
+// parameters used by Atmosoar services (points, multi-point sets, polylines,
+// rectangles, bounding boxes, polygons, WMO station shortcuts, and named
+// country shortcuts).
 //
 // The package exposes several package-level registries (LocationShortcutsMap,
 // StationMap, ActiveShapeProvider) that consumers populate at service startup
@@ -38,6 +38,11 @@ const (
 	LocationTypePoint LocationType = "point"
 	// LocationTypePointList for list of Locations
 	LocationTypePointList LocationType = "point_list"
+	// LocationTypeMultiPoint for a set of independent points (ATMO-405).
+	// Unlike point_list, which consumers may treat as an ordered route,
+	// multi_point carries no ordering semantics beyond request order: each
+	// point is answered on its own.
+	LocationTypeMultiPoint LocationType = "multi_point"
 	// LocationTypePolyline for polyline of locations
 	LocationTypePolyline LocationType = "polyline"
 	// LocationTypeRectangle for an area
@@ -68,6 +73,13 @@ type PointLine struct {
 
 // PointListLocation list of Locations
 type PointListLocation struct {
+	Points []PointLocation `json:"points" validate:"required"`
+}
+
+// MultiPointLocation is a set of independent points (ATMO-405), parsed from
+// "points:lat,lon|lat,lon|..." or the v2 {"type":"multi_point"} payload. The
+// points keep request order and are never deduplicated by this package.
+type MultiPointLocation struct {
 	Points []PointLocation `json:"points" validate:"required"`
 }
 
@@ -155,6 +167,12 @@ const (
 	// location may parse to. It bounds both the generated 5-value form and
 	// the total across '|'-chained segments.
 	MaxPolylinePoints = 2000
+
+	// MaxMultiPoints is the largest number of points a multi_point location
+	// ("points:" prefix or the v2 multi_point payload) may carry. Every point
+	// is an independent lookup downstream, so the cap is far tighter than
+	// MaxPolylinePoints.
+	MaxMultiPoints = 100
 
 	// MaxPolygonVertices bounds the total vertex count of a structured polygon
 	// payload. The largest embedded Natural Earth country (Canada) has 794.
@@ -274,8 +292,8 @@ func ParseLocation(locStr string) (*Location, error) {
 		}, nil
 	}
 
-	// Explicit type-prefixed forms (point:, station:, polyline:, rectangle:,
-	// radius:). The prefix names the location type and is case-insensitive;
+	// Explicit type-prefixed forms (point:, points:, station:, polyline:,
+	// rectangle:, radius:). The prefix names the location type and is case-insensitive;
 	// the remainder uses the same value grammar as the bare form. This lets
 	// the structured v2 JSON body and the v1 query string share one parser.
 	// bbox: is handled above and intentionally not repeated here.
@@ -386,6 +404,13 @@ func parsePrefixedLocation(lower, original string) (*Location, bool, error) {
 		}
 		return &Location{Type: LocationTypePolyline, Payload: PolylineLocation{Coordinates: coords}}, true, nil
 
+	case "points":
+		pts, err := parseMultiPointValue(rest)
+		if err != nil {
+			return nil, true, err
+		}
+		return &Location{Type: LocationTypeMultiPoint, Payload: MultiPointLocation{Points: pts}}, true, nil
+
 	case "rectangle":
 		rect, err := parseRectangleValue(rest)
 		if err != nil {
@@ -405,6 +430,42 @@ func parsePrefixedLocation(lower, original string) (*Location, bool, error) {
 	}
 
 	return nil, false, nil
+}
+
+// parseMultiPointValue parses the value half of a `points:` string: one to
+// MaxMultiPoints lat,lon pairs separated by '|' or ';'. Unlike the bare form,
+// the point count never changes the type (two points in NE/SW order stay two
+// points, not a rectangle), and the 5-value generated-polyline form is
+// rejected because it describes a line, not a set of sites. The cap is checked
+// on the raw segment count before any coordinate is parsed.
+func parseMultiPointValue(s string) ([]PointLocation, error) {
+	if s == "" {
+		return nil, fmt.Errorf("points requires 1 to %d lat,lon pairs, got none", MaxMultiPoints)
+	}
+	parts := strings.Split(strings.ReplaceAll(s, ";", "|"), "|")
+	if len(parts) > MaxMultiPoints {
+		return nil, fmt.Errorf("points accepts at most %d lat,lon pairs, got %d", MaxMultiPoints, len(parts))
+	}
+	pts := make([]PointLocation, 0, len(parts))
+	for i, part := range parts {
+		pair := strings.Split(part, ",")
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("invalid points entry %d %q, expected lat,lon", i+1, part)
+		}
+		lat, err := strconv.ParseFloat(strings.TrimSpace(pair[0]), 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid points entry %d %q: invalid latitude: %w", i+1, part, err)
+		}
+		lon, err := strconv.ParseFloat(strings.TrimSpace(pair[1]), 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid points entry %d %q: invalid longitude: %w", i+1, part, err)
+		}
+		if err := validateLatLon(lat, lon); err != nil {
+			return nil, fmt.Errorf("invalid points entry %d %q: %w", i+1, part, err)
+		}
+		pts = append(pts, PointLocation{Lat: lat, Lon: lon})
+	}
+	return pts, nil
 }
 
 // parseRectangleValue parses the value half of a `rectangle:` string. It
@@ -523,6 +584,21 @@ func decodeLocationPayload(t LocationType, raw json.RawMessage) (interface{}, er
 		}
 		if err := validatePoints(p.Points, MaxPolylinePoints); err != nil {
 			return nil, fmt.Errorf("location: invalid point_list payload: %w", err)
+		}
+		return p, nil
+	case LocationTypeMultiPoint:
+		var p MultiPointLocation
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("location: invalid multi_point payload: %w", err)
+		}
+		if len(p.Points) == 0 {
+			return nil, fmt.Errorf(
+				"location: invalid multi_point payload: 1 to %d points are required, got none",
+				MaxMultiPoints,
+			)
+		}
+		if err := validatePoints(p.Points, MaxMultiPoints); err != nil {
+			return nil, fmt.Errorf("location: invalid multi_point payload: %w", err)
 		}
 		return p, nil
 	case LocationTypePolyline:
@@ -1314,6 +1390,13 @@ func ExpandLocations(loc Location) []PointLocation {
 			return v.Points
 		}
 		if v, ok := loc.Payload.(*PointListLocation); ok && v != nil {
+			return v.Points
+		}
+	case LocationTypeMultiPoint:
+		if v, ok := loc.Payload.(MultiPointLocation); ok {
+			return v.Points
+		}
+		if v, ok := loc.Payload.(*MultiPointLocation); ok && v != nil {
 			return v.Points
 		}
 	case LocationTypePolyline:
