@@ -28,6 +28,7 @@ linters:
     - govet
     - noctx
     - revive
+    - rowserrcheck
     - staticcheck
     - unconvert
     - unused
@@ -38,7 +39,9 @@ linters:
     - copyloopvar
     - dupl
     - gochecknoinits
+    - gocognit
     - goconst
+    - ineffassign
     - loggercheck
     - makezero
     - musttag
@@ -49,10 +52,22 @@ linters:
     - predeclared
     - sqlclosecheck
     - tparallel
+    - unparam
     - wastedassign
     - whitespace
 
   settings:
+    # gocognit/nestif/dupl thresholds and nolintlint strictness follow the
+    # Atmosoar baseline (atmosoar-ci lint/golangci.yml).
+    dupl:
+      threshold: 150
+    gocognit:
+      min-complexity: 40
+    nestif:
+      min-complexity: 6
+    nolintlint:
+      require-explanation: true
+      require-specific: true
     errcheck:
       check-type-assertions: true
     exhaustive:
@@ -73,6 +88,7 @@ linters:
   exclusions:
     warn-unused: true
     presets:
+      - comments
       - std-error-handling
       - common-false-positives
     rules:
@@ -81,9 +97,11 @@ linters:
           - bodyclose
           - dupl
           - errcheck
+          - gocognit
           - goconst
           - gosec
           - noctx
+          - unparam
       # Parameter registry and palette tables repeat each key as map key, Key
       # field and alias target by design; goconst (v2.15+) counts those.
       - path: 'chart/(parameters|palette)\.go'

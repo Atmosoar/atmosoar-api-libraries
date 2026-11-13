@@ -65,3 +65,16 @@ jobs:
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: bash .github/workflows/scripts/enforce_policy.sh
+
+  # ATMO-410 shared gates. The library publishes no image, so trivy runs only
+  # the misconfiguration scan; Go modules are covered by govulncheck/OSV (cq).
+  trivy:
+    if: github.event_name != 'schedule'
+    uses: Atmosoar/atmosoar-ci/.github/workflows/trivy.yml@d23e64779292c06f6515180256372b128dee2032 # v1.1.0
+    with:
+      images: '[]'
+      config-paths: "."
+
+  secrets:
+    if: github.event_name != 'schedule'
+    uses: Atmosoar/atmosoar-ci/.github/workflows/gitleaks.yml@d23e64779292c06f6515180256372b128dee2032 # v1.1.0

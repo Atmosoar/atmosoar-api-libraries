@@ -22,9 +22,9 @@ jobs:
           # Single source of truth for the Go version: go.mod.
           go-version-file: go.mod
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # Must be a release built with a Go toolchain >= the `go` directive
-          # in go.mod (1.27.2) — v2.11 was built with Go 1.26 and refuses to
+          # in go.mod (1.27.4) — v2.11 was built with Go 1.26 and refuses to
           # load the config ("Go language version ... lower than targeted").
-          version: v2.15
+          version: v2.15.0
