@@ -70,11 +70,11 @@ jobs:
   # the misconfiguration scan; Go modules are covered by govulncheck/OSV (cq).
   trivy:
     if: github.event_name != 'schedule'
-    uses: Atmosoar/atmosoar-ci/.github/workflows/trivy.yml@main
+    uses: Atmosoar/atmosoar-ci/.github/workflows/trivy.yml@e5d27ffcb07d17ddae4477f48f2c0cf4fb4a545c # v1.0.1
     with:
       images: '[]'
       config-paths: "."
 
   secrets:
     if: github.event_name != 'schedule'
-    uses: Atmosoar/atmosoar-ci/.github/workflows/gitleaks.yml@main
+    uses: Atmosoar/atmosoar-ci/.github/workflows/gitleaks.yml@e5d27ffcb07d17ddae4477f48f2c0cf4fb4a545c # v1.0.1
