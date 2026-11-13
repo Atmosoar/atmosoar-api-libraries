@@ -38,6 +38,7 @@ type feature struct {
 // properties marshals the kept keys in a fixed order.
 type properties map[string]json.RawMessage
 
+//nolint:unparam // signature fixed by json.Marshaler; the error result is part of the interface
 func (p properties) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('{')

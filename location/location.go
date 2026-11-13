@@ -1010,51 +1010,9 @@ func parseCoordinates(coordStr string) ([]PointLocation, error) {
 			coords = append(coords, PointLocation{Lat: lat, Lon: lon})
 
 		case 5:
-			// Polyline definition (startLat,startLon,endLat,endLon,pointCount)
-			startLat, err := strconv.ParseFloat(pointParts[0], 64)
+			generated, err := parsePolylineSegment(pointParts)
 			if err != nil {
-				return nil, fmt.Errorf("invalid start latitude: %w", err)
-			}
-
-			startLon, err := strconv.ParseFloat(pointParts[1], 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid start longitude: %w", err)
-			}
-
-			endLat, err := strconv.ParseFloat(pointParts[2], 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid end latitude: %w", err)
-			}
-
-			endLon, err := strconv.ParseFloat(pointParts[3], 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid end longitude: %w", err)
-			}
-
-			pointCount, err := strconv.Atoi(pointParts[4])
-			if err != nil || pointCount < 2 {
-				return nil, fmt.Errorf("point count must be integer >= 2")
-			}
-			// The count is the amplification vector: ~30 characters of input
-			// otherwise buys an arbitrarily long slice in generatePoints.
-			if pointCount > MaxPolylinePoints {
-				return nil, fmt.Errorf("point count must be <= %d, got %d", MaxPolylinePoints, pointCount)
-			}
-			if err := validateLatLon(startLat, startLon); err != nil {
-				return nil, fmt.Errorf("invalid polyline start: %w", err)
-			}
-			if err := validateLatLon(endLat, endLon); err != nil {
-				return nil, fmt.Errorf("invalid polyline end: %w", err)
-			}
-
-			// Generate intermediate points
-			generated, err := generatePoints(
-				PointLocation{Lat: startLat, Lon: startLon},
-				PointLocation{Lat: endLat, Lon: endLon},
-				pointCount,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate points: %w", err)
+				return nil, err
 			}
 			coords = append(coords, generated...)
 
@@ -1074,6 +1032,58 @@ func parseCoordinates(coordStr string) ([]PointLocation, error) {
 	}
 
 	return coords, nil
+}
+
+// parsePolylineSegment parses a polyline definition
+// (startLat,startLon,endLat,endLon,pointCount) into its generated points.
+func parsePolylineSegment(pointParts []string) ([]PointLocation, error) {
+	// Polyline definition (startLat,startLon,endLat,endLon,pointCount)
+	startLat, err := strconv.ParseFloat(pointParts[0], 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start latitude: %w", err)
+	}
+
+	startLon, err := strconv.ParseFloat(pointParts[1], 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start longitude: %w", err)
+	}
+
+	endLat, err := strconv.ParseFloat(pointParts[2], 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end latitude: %w", err)
+	}
+
+	endLon, err := strconv.ParseFloat(pointParts[3], 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end longitude: %w", err)
+	}
+
+	pointCount, err := strconv.Atoi(pointParts[4])
+	if err != nil || pointCount < 2 {
+		return nil, fmt.Errorf("point count must be integer >= 2")
+	}
+	// The count is the amplification vector: ~30 characters of input
+	// otherwise buys an arbitrarily long slice in generatePoints.
+	if pointCount > MaxPolylinePoints {
+		return nil, fmt.Errorf("point count must be <= %d, got %d", MaxPolylinePoints, pointCount)
+	}
+	if err := validateLatLon(startLat, startLon); err != nil {
+		return nil, fmt.Errorf("invalid polyline start: %w", err)
+	}
+	if err := validateLatLon(endLat, endLon); err != nil {
+		return nil, fmt.Errorf("invalid polyline end: %w", err)
+	}
+
+	// Generate intermediate points
+	generated, err := generatePoints(
+		PointLocation{Lat: startLat, Lon: startLon},
+		PointLocation{Lat: endLat, Lon: endLon},
+		pointCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate points: %w", err)
+	}
+	return generated, nil
 }
 
 // generatePoints creates evenly spaced points between start and end
@@ -1437,57 +1447,67 @@ func ExpandLocations(loc Location) []PointLocation {
 			return []PointLocation{{Lat: centerLat, Lon: centerLon}}
 		}
 	case LocationTypeRadius:
-		var rad *RadiusLocation
-		if v, ok := loc.Payload.(RadiusLocation); ok {
-			rad = &v
-		} else if v, ok := loc.Payload.(*RadiusLocation); ok && v != nil {
-			rad = v
-		}
-		if rad != nil {
-			// If radius < 3 km → only the center point.
-			// NaN satisfies no ordered comparison, so it is tested explicitly
-			// here rather than being allowed to reach int(math.Floor(NaN)).
-			if math.IsNaN(rad.Radius) || rad.Radius < radiusRingStepKm {
-				return []PointLocation{{Lat: rad.Lat, Lon: rad.Lon}}
-			}
-
-			// Defence in depth: validateRadius rejects anything above
-			// MaxRadiusKm at parse time, but ExpandLocations has no error
-			// return, so a hand-built Location (or a future payload path that
-			// forgets to validate) must still be unable to pre-allocate
-			// gigabytes here. Clamping to MaxRadiusKm — and bounding the loop
-			// by MaxExpandedRadiusPoints — is strictly safer than an OOM.
-			radiusKm := math.Min(rad.Radius, MaxRadiusKm)
-
-			// Build rings every radiusRingStepKm; ring k has 3 + k points
-			// BUG-004:
-			//   1) Pre-size pts using the closed-form sum of ring sizes.
-			//      For k = 0, 3, 6, …, 3*K (K = maxKm/3) ring sizes are
-			//      3, 6, 9, …, 3*(K+1). Sum = 3 * n * (n+1) / 2 where n = K+1.
-			//   2) Hoist sin/cos(angDist) out of the inner bearing loop —
-			//      angDist depends only on k.
-			maxKm := int(math.Floor(radiusKm))
-			ringCount := maxKm/radiusRingStepKm + 1
-			capacity := 3 * ringCount * (ringCount + 1) / 2
-			pts := make([]PointLocation, 0, capacity)
-
-			for k := 0; k <= maxKm && len(pts) < MaxExpandedRadiusPoints; k += radiusRingStepKm {
-				n := 3 + k
-				step := 360.0 / float64(n)
-				angDist := float64(k) / earthRadiusKm
-				sinAng := math.Sin(angDist)
-				cosAng := math.Cos(angDist)
-				for j := 0; j < n; j++ {
-					bearing := float64(j) * step
-					lat2, lon2 := destinationPointPrecomputed(rad.Lat, rad.Lon, sinAng, cosAng, bearing)
-					pts = append(pts, PointLocation{Lat: lat2, Lon: lon2})
-				}
-			}
-			return pts
+		if rad := radiusPayload(loc.Payload); rad != nil {
+			return expandRadius(rad)
 		}
 	}
 	// Unknown/empty -> no points
 	return nil
+}
+
+// radiusPayload returns the radius payload by value or pointer, nil otherwise.
+func radiusPayload(payload any) *RadiusLocation {
+	if v, ok := payload.(RadiusLocation); ok {
+		return &v
+	}
+	if v, ok := payload.(*RadiusLocation); ok && v != nil {
+		return v
+	}
+	return nil
+}
+
+// expandRadius expands a radius location into concentric rings of points.
+func expandRadius(rad *RadiusLocation) []PointLocation {
+	// If radius < 3 km → only the center point.
+	// NaN satisfies no ordered comparison, so it is tested explicitly
+	// here rather than being allowed to reach int(math.Floor(NaN)).
+	if math.IsNaN(rad.Radius) || rad.Radius < radiusRingStepKm {
+		return []PointLocation{{Lat: rad.Lat, Lon: rad.Lon}}
+	}
+
+	// Defence in depth: validateRadius rejects anything above
+	// MaxRadiusKm at parse time, but ExpandLocations has no error
+	// return, so a hand-built Location (or a future payload path that
+	// forgets to validate) must still be unable to pre-allocate
+	// gigabytes here. Clamping to MaxRadiusKm — and bounding the loop
+	// by MaxExpandedRadiusPoints — is strictly safer than an OOM.
+	radiusKm := math.Min(rad.Radius, MaxRadiusKm)
+
+	// Build rings every radiusRingStepKm; ring k has 3 + k points
+	// BUG-004:
+	//   1) Pre-size pts using the closed-form sum of ring sizes.
+	//      For k = 0, 3, 6, …, 3*K (K = maxKm/3) ring sizes are
+	//      3, 6, 9, …, 3*(K+1). Sum = 3 * n * (n+1) / 2 where n = K+1.
+	//   2) Hoist sin/cos(angDist) out of the inner bearing loop —
+	//      angDist depends only on k.
+	maxKm := int(math.Floor(radiusKm))
+	ringCount := maxKm/radiusRingStepKm + 1
+	capacity := 3 * ringCount * (ringCount + 1) / 2
+	pts := make([]PointLocation, 0, capacity)
+
+	for k := 0; k <= maxKm && len(pts) < MaxExpandedRadiusPoints; k += radiusRingStepKm {
+		n := 3 + k
+		step := 360.0 / float64(n)
+		angDist := float64(k) / earthRadiusKm
+		sinAng := math.Sin(angDist)
+		cosAng := math.Cos(angDist)
+		for j := 0; j < n; j++ {
+			bearing := float64(j) * step
+			lat2, lon2 := destinationPointPrecomputed(rad.Lat, rad.Lon, sinAng, cosAng, bearing)
+			pts = append(pts, PointLocation{Lat: lat2, Lon: lon2})
+		}
+	}
+	return pts
 }
 
 const earthRadiusKm = 6371.0
