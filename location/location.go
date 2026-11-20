@@ -276,6 +276,31 @@ func ShapeProvider() *shapefile.ShapeProvider {
 // 150: The input is lowercased before shortcut/station lookup so that
 // e.g. "Germany", "GERMANY", "germany" all resolve identically.
 func ParseLocation(locStr string) (*Location, error) {
+	loc, _, err := parseLocation(locStr)
+	return loc, err
+}
+
+// ParseInfo describes how ParseLocationWithInfo arrived at a Location's type.
+type ParseInfo struct {
+	// Inferred is true when the request did not name the location type and
+	// the parser chose it from the number and order of bare lat,lon pairs
+	// (ATMO-430): `a|b` is a rectangle when a lies north-east of b and a
+	// two-point polyline otherwise, three or more pairs are a polyline. Such
+	// a request changes shape when the caller reorders its points, so a
+	// service should tell the client and point it at the explicit `points:`,
+	// `rectangle:` or `polyline:` prefix. False for every prefixed form,
+	// single points, stations, shortcuts, radius and the 5-value polyline.
+	Inferred bool
+}
+
+// ParseLocationWithInfo is ParseLocation plus how the type was chosen. The
+// returned Location is identical to ParseLocation's for every input.
+func ParseLocationWithInfo(locStr string) (*Location, ParseInfo, error) {
+	return parseLocation(locStr)
+}
+
+// parseLocation implements ParseLocation and ParseLocationWithInfo.
+func parseLocation(locStr string) (*Location, ParseInfo, error) {
 	// 150: Lowercase for case-insensitive shortcut and station matching.
 	// Maps are populated with lowercase keys at startup (see bootstrap.go).
 	locLower := strings.ToLower(locStr)
@@ -284,12 +309,12 @@ func ParseLocation(locStr string) (*Location, error) {
 	if strings.HasPrefix(locLower, "bbox:") {
 		bbox, err := parseBbox(locStr[5:]) // skip "bbox:" prefix, use original case for numbers
 		if err != nil {
-			return nil, err
+			return nil, ParseInfo{}, err
 		}
 		return &Location{
 			Type:    LocationTypeBbox,
 			Payload: *bbox,
-		}, nil
+		}, ParseInfo{}, nil
 	}
 
 	// Explicit type-prefixed forms (point:, points:, station:, polyline:,
@@ -298,7 +323,7 @@ func ParseLocation(locStr string) (*Location, error) {
 	// the structured v2 JSON body and the v1 query string share one parser.
 	// bbox: is handled above and intentionally not repeated here.
 	if loc, handled, err := parsePrefixedLocation(locLower, locStr); handled {
-		return loc, err
+		return loc, ParseInfo{}, err
 	}
 
 	// Check for station ID (WMO format)
@@ -306,7 +331,7 @@ func ParseLocation(locStr string) (*Location, error) {
 		return &Location{
 			Type:    LocationTypePoint,
 			Payload: getLocationFromStationID(locLower),
-		}, nil
+		}, ParseInfo{}, nil
 	}
 
 	// Check for predefined shortcuts — try polygon resolution first, fall back to rectangle.
@@ -315,30 +340,34 @@ func ParseLocation(locStr string) (*Location, error) {
 			return &Location{
 				Type:    LocationTypePolygon,
 				Payload: *poly,
-			}, nil
+			}, ParseInfo{}, nil
 		}
 		return &Location{
 			Type:    LocationTypeRectangle,
 			Payload: getLocationFromShortcut(locLower),
-		}, nil
+		}, ParseInfo{}, nil
 	}
 
 	// try "lat,lon|radiusKm"
 	if rLoc, ok, rErr := tryParseRadius(locStr); ok {
 		if rErr != nil {
-			return nil, rErr
+			return nil, ParseInfo{}, rErr
 		}
 		return &Location{
 			Type:    LocationTypeRadius,
 			Payload: *rLoc,
-		}, nil
+		}, ParseInfo{}, nil
 	}
 
 	// Try parsing as coordinates
 	coords, err := parseCoordinates(locStr)
 	if err != nil {
-		return nil, err
+		return nil, ParseInfo{}, err
 	}
+	// bareParts counts the '|'-separated pairs the caller wrote. Two or more
+	// mean the type below is chosen from the point count and order (ATMO-430);
+	// the single 5-value generated-polyline form names a line and is not.
+	bareParts := strings.Count(locStr, "|") + 1
 
 	// Determine location type based on coordinate count
 	switch len(coords) {
@@ -346,7 +375,7 @@ func ParseLocation(locStr string) (*Location, error) {
 		return &Location{
 			Type:    LocationTypePoint,
 			Payload: coords[0],
-		}, nil
+		}, ParseInfo{}, nil
 	case 2:
 		// Could be rectangle or polyline with 2 points
 		if isRectangle(coords) {
@@ -356,14 +385,14 @@ func ParseLocation(locStr string) (*Location, error) {
 					NorthEast: coords[0],
 					SouthWest: coords[1],
 				},
-			}, nil
+			}, ParseInfo{Inferred: bareParts > 1}, nil
 		}
 		fallthrough
 	default:
 		return &Location{
 			Type:    LocationTypePolyline,
 			Payload: PolylineLocation{Coordinates: coords},
-		}, nil
+		}, ParseInfo{Inferred: bareParts > 1}, nil
 	}
 }
 
