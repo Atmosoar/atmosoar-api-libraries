@@ -114,7 +114,22 @@ truth for the Go version; CI derives from it via `actions/setup-go` with
 
 This repo publishes semantic Go module versions. Consumers pin to tagged versions in their `go.mod`.
 
-### Unreleased (next: v0.9.0)
+### Unreleased (next: v0.10.0)
+
+- **`location` reports an inferred location type (ATMO-430).** New
+  `ParseLocationWithInfo(s) (*Location, ParseInfo, error)` returns the same
+  `Location` and error as `ParseLocation`, plus `ParseInfo.Inferred`: true
+  when the request named no type and the parser chose it from the number and
+  order of bare `lat,lon|lat,lon|...` pairs (two pairs with the first
+  north-east of the second → rectangle, any other two or more → polyline).
+  Such a request changes shape when the caller swaps its points; services can
+  warn and point the client at the explicit `points:`, `rectangle:` or
+  `polyline:` prefix. Every prefixed form, a single point, station,
+  shortcut, radius, bbox and the 5-value generated polyline report false.
+  Parsing itself is unchanged (`isRectangle` keeps its NE/SW rule), so this
+  is a minor version with no behaviour change for existing callers.
+
+### v0.9.0
 
 - **`location` parses a set of independent points (ATMO-405).** New
   `LocationTypeMultiPoint` (`"multi_point"`) with payload
